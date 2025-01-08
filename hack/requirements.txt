@@ -1,0 +1,11 @@
+accelerate
+colorama
+datasets
+evaluate
+flash-attn
+GPUtil
+seaborn
+termcolor
+timm
+transformers[torch]
+typed-argument-parser

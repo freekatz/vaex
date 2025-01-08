@@ -1,19 +1,19 @@
-import dist
-import torch
 from typing import Tuple
-from utils import arg_util
 
+import torch
+
+from utils import dist_utils
 
 def debug_nan_grad(model):
     print('[debug_nan_grad opened]')
     for n, p in list(model.named_parameters()) + list(model.named_buffers()):
         if p.requires_grad and p.grad is not None:
             if p.grad.isnan().any():
-                err = f"[rk{dist.get_rank()}] [{n} (type={type(p)}, shape={tuple(p.shape)}, num={p.grad.isnan().sum().item()}/{p.numel()})] grad has NAN"
+                err = f"[rk{dist_utils.get_rank()}] [{n} (type={type(p)}, shape={tuple(p.shape)}, num={p.grad.isnan().sum().item()}/{p.numel()})] grad has NAN"
                 print(err, flush=True, force=True, deeper=True)
                 raise AttributeError(err)
             if p.grad.isinf().any():
-                err = f"[rk{dist.get_rank()}] [{n} (type={type(p)}, shape={tuple(p.shape)}, num={p.grad.isinf().sum().item()}/{p.numel()})] grad has INF"
+                err = f"[rk{dist_utils.get_rank()}] [{n} (type={type(p)}, shape={tuple(p.shape)}, num={p.grad.isinf().sum().item()}/{p.numel()})] grad has INF"
                 print(err, flush=True, force=True, deeper=True)
                 raise AttributeError(err)
 
@@ -22,11 +22,11 @@ def debug_nan_param(model):
     print('[debug_nan_param opened]')
     for n, p in list(model.named_parameters()) + list(model.named_buffers()):
         if p.data.isnan().any():
-            err = f"[rk{dist.get_rank()}] [{n} (type={type(p)}, shape={tuple(p.shape)}, num={p.isnan().sum().item()}/{p.numel()})] param has NAN"
+            err = f"[rk{dist_utils.get_rank()}] [{n} (type={type(p)}, shape={tuple(p.shape)}, num={p.isnan().sum().item()}/{p.numel()})] param has NAN"
             print(err, flush=True, force=True, deeper=True)
             raise AttributeError(err)
         if p.data.isinf().any() and 'attn_bias' not in n and 'attn_mask' not in n:
-            err = f"[rk{dist.get_rank()}] [{n} (type={type(p)}, shape={tuple(p.shape)}, num={p.isinf().sum().item()}/{p.numel()})] param has INF"
+            err = f"[rk{dist_utils.get_rank()}] [{n} (type={type(p)}, shape={tuple(p.shape)}, num={p.isinf().sum().item()}/{p.numel()})] param has INF"
             print(err, flush=True, force=True, deeper=True)
             raise AttributeError(err)
 
@@ -44,11 +44,11 @@ def debug_nan_hook(model):
                 if isinstance(x, torch.Tensor):
                     d = x.data
                     if d.isnan().any():
-                        err = f"[rk{dist.get_rank()}] [module={type(module)}] [==preforward==] inps has NAN (shape={tuple(d.shape)}, num={d.isnan().sum().item()}/{d.numel()})"
+                        err = f"[rk{dist_utils.get_rank()}] [module={type(module)}] [==preforward==] inps has NAN (shape={tuple(d.shape)}, num={d.isnan().sum().item()}/{d.numel()})"
                         print(err, flush=True, force=True, deeper=True)
                         raise AttributeError(err)
                     if d.isinf().any():
-                        err = f"[rk{dist.get_rank()}] [module={type(module)}] [==preforward==] inps has INF (shape={tuple(d.shape)}, num={d.isinf().sum().item()}/{d.numel()})"
+                        err = f"[rk{dist_utils.get_rank()}] [module={type(module)}] [==preforward==] inps has INF (shape={tuple(d.shape)}, num={d.isinf().sum().item()}/{d.numel()})"
                         print(err, flush=True, force=True, deeper=True)
                         raise AttributeError(err)
         # return inps
@@ -61,11 +61,11 @@ def debug_nan_hook(model):
                 if isinstance(x, torch.Tensor):
                     d = x.data
                     if d.isnan().any():
-                        err = f"[rk{dist.get_rank()}] [module={type(module)}] [==forward==] oups has NAN (shape={tuple(d.shape)}, num={d.isnan().sum().item()}/{d.numel()})"
+                        err = f"[rk{dist_utils.get_rank()}] [module={type(module)}] [==forward==] oups has NAN (shape={tuple(d.shape)}, num={d.isnan().sum().item()}/{d.numel()})"
                         print(err, flush=True, force=True, deeper=True)
                         raise AttributeError(err)
                     if d.isinf().any():
-                        err = f"[rk{dist.get_rank()}] [module={type(module)}] [==forward==] oups has INF (shape={tuple(d.shape)}, num={d.isinf().sum().item()}/{d.numel()})"
+                        err = f"[rk{dist_utils.get_rank()}] [module={type(module)}] [==forward==] oups has INF (shape={tuple(d.shape)}, num={d.isinf().sum().item()}/{d.numel()})"
                         print(err, flush=True, force=True, deeper=True)
                         raise AttributeError(err)
         # return oups
@@ -78,11 +78,11 @@ def debug_nan_hook(model):
                 if isinstance(x, torch.Tensor):
                     d = x.data
                     if d.isnan().any():
-                        err = f"[rk{dist.get_rank()}][ [module={type(module)}] ==backward==] g_inps has NAN (shape={tuple(d.shape)}, num={d.isnan().sum().item()}/{d.numel()})"
+                        err = f"[rk{dist_utils.get_rank()}][ [module={type(module)}] ==backward==] g_inps has NAN (shape={tuple(d.shape)}, num={d.isnan().sum().item()}/{d.numel()})"
                         print(err, flush=True, force=True, deeper=True)
                         raise AttributeError(err)
                     if d.isinf().any():
-                        err = f"[rk{dist.get_rank()}][ [module={type(module)}] ==backward==] g_inps has INF (shape={tuple(d.shape)}, num={d.isinf().sum().item()}/{d.numel()})"
+                        err = f"[rk{dist_utils.get_rank()}][ [module={type(module)}] ==backward==] g_inps has INF (shape={tuple(d.shape)}, num={d.isinf().sum().item()}/{d.numel()})"
                         print(err, flush=True, force=True, deeper=True)
                         raise AttributeError(err)
         if g_oups is not None:
@@ -90,11 +90,11 @@ def debug_nan_hook(model):
                 if isinstance(x, torch.Tensor):
                     d = x.data
                     if d.isnan().any():
-                        err = f"[rk{dist.get_rank()}][ [module={type(module)}] ==backward==] g_oups has NAN (shape={tuple(d.shape)}, num={d.isnan().sum().item()}/{d.numel()})"
+                        err = f"[rk{dist_utils.get_rank()}][ [module={type(module)}] ==backward==] g_oups has NAN (shape={tuple(d.shape)}, num={d.isnan().sum().item()}/{d.numel()})"
                         print(err, flush=True, force=True, deeper=True)
                         raise AttributeError(err)
                     if d.isinf().any():
-                        err = f"[rk{dist.get_rank()}][ [module={type(module)}] ==backward==] g_oups has INF (shape={tuple(d.shape)}, num={d.isinf().sum().item()}/{d.numel()})"
+                        err = f"[rk{dist_utils.get_rank()}][ [module={type(module)}] ==backward==] g_oups has INF (shape={tuple(d.shape)}, num={d.isinf().sum().item()}/{d.numel()})"
                         print(err, flush=True, force=True, deeper=True)
                         raise AttributeError(err)
         # return g_inps

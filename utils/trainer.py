@@ -30,15 +30,9 @@ class VAETrainer(object):
         dcrit: str, vae_opt: AmpOptimizer, disc_opt: AmpOptimizer,
         daug=1.0, lpips_loss: LPIPS = None, lp_reso=64, wei_l1=1.0, wei_l2=0.0, wei_entropy=0.0, wei_lpips=0.5, wei_disc=0.6, adapt_type=1, bcr=5.0, bcr_cut=0.5, reg=0.0, reg_every=16,
         disc_grad_ckpt=False,
-        dbg_unused=False, dbg_nan=False,
     ):
         super(VAETrainer, self).__init__()
-        self.dbg_unused, self.dbg_nan = dbg_unused, dbg_nan
-        if self.dbg_nan:
-            print('[dbg_nan mode on]')
-            nan.debug_nan_hook(vae)
-            nan.debug_nan_hook(disc)
-        
+
         self.vae, self.disc = vae, disc
         self.vae_opt, self.disc_opt = vae_opt, disc_opt
         self.vae_wo_ddp: VQVAE = vae_wo_ddp  # after torch.compile
@@ -213,21 +207,6 @@ class VAETrainer(object):
             if self.using_ema:
                 with maybe_record_function('EMA_upd'):
                     self.ema_update(g_it)
-            
-            if self.dbg_nan:
-                nan.debug_nan_grad(self.vae_wo_ddp), nan.debug_nan_grad(self.disc_wo_ddp)
-                nan.debug_nan_param(self.vae_wo_ddp), nan.debug_nan_param(self.disc_wo_ddp)
-            if self.dbg_unused:
-                ls = []
-                for n, p in self.vae_wo_ddp.named_parameters():
-                    if p.grad is None and n not in {'quantize.embedding.weight'}: # or tuple(p.grad.shape) == (512, 512, 1, 1):
-                        ls.append(n)
-                for n, p in self.disc_wo_ddp.named_parameters():
-                    if p.grad is None: # or tuple(p.grad.shape) == (512, 512, 1, 1):
-                        ls.append(n)
-                if len(ls):
-                    print(f'unused param: {ls}', flush=True, file=sys.stderr)
-            
             with maybe_record_function('opt_step'):
                 self.vae_opt.optimizer.zero_grad(set_to_none=True)
                 self.disc_opt.optimizer.zero_grad(set_to_none=True)

@@ -1,3 +1,5 @@
+import os
+import sys
 from typing import Tuple
 
 import torch.nn as nn
@@ -7,6 +9,9 @@ from .quant import VectorQuantizer
 from .vqvae import VQVAE
 from .dino import DinoDisc
 from .basic_vae import CNNEncoder
+
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../'))
 
 
 def build_vae_disc(args: Args) -> Tuple[VQVAE, DinoDisc]:
