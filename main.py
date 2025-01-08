@@ -337,7 +337,9 @@ def train_one_ep(ep: int, is_first_ep: bool, start_it: int, args: arg_util.Args,
                 d_ratio = 1 if grad_norm_d is None else min(1.0, args.grad_clip / (grad_norm_d + 1e-7))
                 tb_lg.update(head='PT_opt_lr/lr_max', actu_glr=g_ratio*max_glr, actu_dlr=d_ratio*max_dlr)
                 tb_lg.update(head='PT_opt_lr/lr_min', actu_glr=g_ratio*min_glr, actu_dlr=d_ratio*min_dlr)
-    
+
+    if doing_profiling:
+        profiler.stop()
     me.synchronize_between_processes()
     return {k: meter.global_avg for k, meter in me.meters.items()}, me.iter_time.time_preds(max_it - (g_it + 1) + (args.ep - ep) * 15)  # +15: other cost
 
