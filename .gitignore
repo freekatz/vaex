@@ -23,6 +23,9 @@ local_output*
 *.pth.tar
 *.ckpt
 *.txt
+*.jpg
+*.jpeg
+*.png
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

@@ -105,23 +105,103 @@ class VQVAE(nn.Module):
 
 
 if __name__ == '__main__':
-    for clz in (nn.Linear, nn.LayerNorm, nn.BatchNorm2d, nn.SyncBatchNorm, nn.Conv1d, nn.Conv2d, nn.ConvTranspose1d, nn.ConvTranspose2d):
-        setattr(clz, 'reset_parameters', lambda self: None)
-    # cnn = VQVAE(ch=160, vocab_norm=False)
-    # print(cnn)
-    # numel = [p.numel() for p in cnn.parameters()]
-    # para = sum(numel)
-    # print(len(numel), para, para/1e6)
-    # exit(0)
-    
-    # cnn = VQVAE(ch=32, vocab_norm=True)
-    # vit = VQVAE(vitamin='S', vocab_norm=True)
-    # cnn(torch.rand(2, 3, 192, 288))[0].mean().backward()
-    # vit(torch.rand(2, 3, 256, 256))[0].mean().backward()
-    # print(cnn.state_dict()['vocab_usage_record_times'])
-    torch.manual_seed(0)
-    cnn = VQVAE(ch=32, vocab_width=16, vocab_norm=False)
-    print(str(cnn).replace('BnActConvBnActConv', 'ResnetBlock').replace('2x(', '('))
-    from models import init_weights
-    init_weights(cnn, -0.5)
-    torch.save(cnn.state_dict(), r'C:\Users\16333\Desktop\PyCharm\vlip\local_output\cnn.pth')
+    # TODO 解决
+    #   RuntimeError: Error(s) in loading state_dict for VQVAE:
+    # 	Missing key(s) in state_dict: "quantize.quant_resi.weight", "quantize.quant_resi.bias".
+    # 	Unexpected key(s) in state_dict: "quantize.ema_vocab_hit_SV", "quantize.quant_resi.qresi_ls.0.weight", "quantize.quant_resi.qresi_ls.0.bias", "quantize.quant_resi.qresi_ls.1.weight", "quantize.quant_resi.qresi_ls.1.bias", "quantize.quant_resi.qresi_ls.2.weight", "quantize.quant_resi.qresi_ls.2.bias", "quantize.quant_resi.qresi_ls.3.weight", "quantize.quant_resi.qresi_ls.3.bias".
+
+    import glob
+    import math
+
+    import PIL.Image as PImage
+    from torchvision.transforms import InterpolationMode, transforms
+    import torch
+
+    from utils import dist_utils
+
+    dist_utils.init_distributed_mode(local_out_path='./tmp', timeout_minutes=30)
+
+    def normalize_01_into_pm1(x):  # normalize x from [0, 1] to [-1, 1] by (x*2) - 1
+        return x.add(x).add_(-1)
+
+    def img_folder_to_tensor(img_folder: str, transform: transforms.Compose, img_size: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        ori_aug = transforms.Compose(
+            [
+                transforms.Resize((img_size, img_size), interpolation=InterpolationMode.LANCZOS),
+                transforms.ToTensor()
+            ]
+        )
+        # mid_reso = 1.125
+        # final_reso = 256
+        # mid_reso = round(min(mid_reso, 2) * final_reso)
+        # ori_aug = transforms.Compose(
+        #     [
+        #         transforms.Resize(mid_reso, interpolation=InterpolationMode.LANCZOS),
+        #         transforms.CenterCrop((final_reso, final_reso)),
+        #         # transforms.Resize(final_reso, interpolation=InterpolationMode.LANCZOS),
+        #         transforms.ToTensor(), normalize_01_into_pm1
+        #     ]
+        # )
+        img_list = glob.glob(f'{img_folder}/*.png')
+        img_all = []
+        ori_img_all = []
+        for img_path in img_list:
+            img_tensor = transform(PImage.open(img_path))
+            origin_img_tensor = ori_aug(PImage.open(img_path))
+            img_all.append(img_tensor)
+            ori_img_all.append(origin_img_tensor)
+        img_tensor = torch.stack(img_all, dim=0)
+        origin_img_tensor = torch.stack(ori_img_all, dim=0)
+        return origin_img_tensor, img_tensor
+
+    def tensor_to_img(img_tensor: torch.Tensor) -> PImage.Image:
+        B, C, H, W = img_tensor.shape
+        assert int(math.sqrt(B)) * int(math.sqrt(B)) == B
+        b = int(math.sqrt(B))
+        img_tensor = torch.permute(img_tensor, (1, 0, 2, 3))
+        img_tensor = torch.reshape(img_tensor, (C, b, b * H, W))
+        img_tensor = torch.permute(img_tensor, (0, 2, 1, 3))
+        img_tensor = torch.reshape(img_tensor, (C, b * H, b * W))
+        img = transforms.ToPILImage()(img_tensor)
+        return img
+
+    vae_ckpt = r'/Users/katz/Downloads/vae_ch160v4096z32.pth'
+    B, C, H, W = 4, 3, 256, 256
+    # vae = VQVAE(vocab_size=4096, z_channels=32, ch=160, test_mode=True,
+    #             share_quant_resi=4, v_patch_nums=(1, 2, 3, 4, 5, 6, 8, 10, 13, 16)).to('cpu')
+    vae = VQVAE(
+        grad_ckpt=False,
+        vitamin='cnn', drop_path_rate=0.0,
+        ch=160, ch_mult=(1, 1, 2, 2, 4), dropout=0.0,
+        vocab_size=4096, vocab_width=32, vocab_norm=False, beta=0.25,
+        quant_conv_k=3, quant_resi=-0.5,
+    ).to('cpu')
+    vae.eval()
+    vae.load_state_dict(torch.load(vae_ckpt, map_location='cpu'), strict=True)
+
+    mid_reso = 1.125
+    final_reso = 256
+    mid_reso = round(min(mid_reso, 2) * final_reso)
+    aug = transforms.Compose(
+        [
+            # transforms.Resize(mid_reso, interpolation=InterpolationMode.LANCZOS),
+            # transforms.CenterCrop((final_reso, final_reso)),
+            transforms.Resize((final_reso, final_reso), interpolation=InterpolationMode.LANCZOS),
+            transforms.ToTensor()
+        ]
+    )
+    origin_img, img = img_folder_to_tensor('../tmp', aug, img_size=final_reso)
+    print(img.shape)
+
+    in_img = tensor_to_img(origin_img)
+    in_img.save('../inp.png')
+
+    img = torch.clamp(img, 0., 1.)
+    img = img.add(img).add_(-1)
+    # res, vq_loss, usages = vae.forward(img, ret_usages=True)
+    res, vq_loss, entropy_loss, usages = vae.forward(img, ret_usages=True)
+    print(res.shape)
+    print(usages)
+
+    res_img = tensor_to_img(res)
+    res_img.save('../out.png')
