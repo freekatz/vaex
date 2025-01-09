@@ -13,6 +13,7 @@ cp -r ../Makefile ./
 cp -r ../hack ./
 cp -r ../utils ./
 cp -r ../models ./
+cp -r ../scripts ./
 cp -r ../*.py ./
 
 cd ../

@@ -1,4 +1,3 @@
-import glob
 import os
 
 import PIL.Image as PImage
@@ -31,7 +30,7 @@ class FFHQ(Dataset):
         self.root = root
         split_file = os.path.join(self.root, f'ffhq_{split}.txt')
         with open(split_file, 'r') as file:
-            self.samples = [os.path.join(self.root, line.strip()) for line in file.readlines() if line.endswith('.png')]
+            self.samples = [os.path.join(self.root, line.strip()) for line in file.readlines() if line.find('.png') != -1]
         assert(len(self.samples) > 0)
 
         self.transform = transform
