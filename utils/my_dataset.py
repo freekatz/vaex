@@ -28,9 +28,13 @@ class UnlabeledDatasetFolder(DatasetFolder):
 class FFHQ(Dataset):
     def __init__(self, root, transform=None, split='train'):
         super().__init__()
-        self.root = os.path.join(root, split)
+        self.root = root
+        split_file = os.path.join(self.root, f'ffhq_{split}.txt')
+        with open(split_file, 'r') as file:
+            self.samples = [os.path.join(self.root, line.strip()) for line in file.readlines() if line.endswith('.png')]
+        assert(len(self.samples) > 0)
+
         self.transform = transform
-        self.samples = glob.glob(self.root + '/*.png')
         self.loader = pil_loader
 
     def __len__(self):

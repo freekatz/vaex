@@ -1,7 +1,4 @@
-accelerate
 colorama
-datasets
-evaluate
 flash-attn
 GPUtil
 seaborn
