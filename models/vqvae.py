@@ -119,7 +119,7 @@ if __name__ == '__main__':
 
     from utils import dist_utils
 
-    dist_utils.init_distributed_mode(local_out_path='./tmp', timeout_minutes=30)
+    dist_utils.init_distributed_mode(local_out_path='../tmp', timeout_minutes=30)
 
     def normalize_01_into_pm1(x):  # normalize x from [0, 1] to [-1, 1] by (x*2) - 1
         return x.add(x).add_(-1)
