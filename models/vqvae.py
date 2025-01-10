@@ -12,7 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from models.basic_vae import CNNDecoder, CNNEncoder
-from models.quant import VectorQuantizer
+from models.quant import VectorQuantizer2
 
 
 def identity(x, inplace=False): return x
@@ -39,6 +39,9 @@ class VQVAE(nn.Module):
         vocab_norm=False,           # whether to limit the codebook vectors to have unit norm
         beta=0.25,                  # commitment loss weight
         quant_conv_k=3,             # quant conv kernel size
+        share_quant_resi=4,         # use 4 \phi layers for K scales: partially-shared \phi
+        default_qresi_counts=0,     # if is 0: automatically set to len(v_patch_nums)
+        v_patch_nums=(1, 2, 3, 4, 5, 6, 8, 10, 13, 16), # number of patches for each scale, h_{1 to K} = w_{1 to K} = v_patch_nums[k]
         quant_resi=-0.5,            #
     ):
         super().__init__()
@@ -56,8 +59,11 @@ class VQVAE(nn.Module):
         
         # 3. build quant
         print(f'[VQVAE] create VectorQuantizer with {vocab_size=}, {vocab_width=} {vocab_norm=}, {beta=:g} ...', flush=True)
-        self.quantize: VectorQuantizer = VectorQuantizer(vocab_size=vocab_size, vocab_width=vocab_width, vocab_norm=vocab_norm, beta=beta, quant_resi=quant_resi)
-        
+        # self.quantize: VectorQuantizer2 = VectorQuantizer2(vocab_size=vocab_size, vocab_width=vocab_width, vocab_norm=vocab_norm, beta=beta, quant_resi=quant_resi)
+        self.quantize: VectorQuantizer2 = VectorQuantizer2(
+            vocab_size=vocab_size, Cvae=vocab_width, using_znorm=vocab_norm, beta=beta,
+            default_qresi_counts=default_qresi_counts, v_patch_nums=v_patch_nums, quant_resi=quant_resi, share_quant_resi=share_quant_resi,
+        )
         # 4. build conv after quant
         self.post_quant_conv = nn.Conv2d(vocab_width, vocab_width, quant_conv_k, stride=1, padding=quant_conv_k // 2)
         print(f'[VQVAE] create CNN Decoder with {ch=}, {ch_mult=} {dropout=:g} ...', flush=True)
@@ -73,7 +79,7 @@ class VQVAE(nn.Module):
     def forward(self, img_B3HW, ret_usages=False):
         f_BChw = self.encoder(img_B3HW).float()
         with torch.cuda.amp.autocast(enabled=False):
-            VectorQuantizer.forward
+            VectorQuantizer2.forward
             f_BChw, vq_loss, entropy_loss, usages = self.quantize(self.quant_conv(f_BChw), ret_usages=ret_usages)
             f_BChw = self.post_quant_conv(f_BChw)
         return self.decoder(f_BChw).float(), vq_loss, entropy_loss, usages
@@ -98,9 +104,11 @@ class VQVAE(nn.Module):
     
     def load_state_dict(self, state_dict: Dict[str, Any], strict=True, assign=False):
         if 'quantize.vocab_usage' not in state_dict or state_dict['quantize.vocab_usage'].shape[0] != self.quantize.vocab_usage.shape[0]:
-            state_dict['quantize.vocab_usage'] = self.quantize.vocab_usage
+            # state_dict['quantize.vocab_usage'] = self.quantize.vocab_usage
+            state_dict['quantize.ema_vocab_hit_SV'] = self.quantize.ema_vocab_hit_SV
         if 'vocab_usage_record_times' in state_dict:
-            self.quantize.vocab_usage_record_times = state_dict.pop('vocab_usage_record_times')
+            # self.quantize.vocab_usage_record_times = state_dict.pop('vocab_usage_record_times')
+            self.quantize.record_hit = state_dict.pop('vocab_usage_record_times')
         return super().load_state_dict(state_dict=state_dict, strict=strict, assign=assign)
 
 
@@ -167,8 +175,6 @@ if __name__ == '__main__':
 
     vae_ckpt = r'/Users/katz/Downloads/vae_ch160v4096z32.pth'
     B, C, H, W = 4, 3, 256, 256
-    # vae = VQVAE(vocab_size=4096, z_channels=32, ch=160, test_mode=True,
-    #             share_quant_resi=4, v_patch_nums=(1, 2, 3, 4, 5, 6, 8, 10, 13, 16)).to('cpu')
     vae = VQVAE(
         grad_ckpt=False,
         vitamin='cnn', drop_path_rate=0.0,
@@ -177,7 +183,8 @@ if __name__ == '__main__':
         quant_conv_k=3, quant_resi=-0.5,
     ).to('cpu')
     vae.eval()
-    vae.load_state_dict(torch.load(vae_ckpt, map_location='cpu'), strict=True)
+    state_dict = torch.load(vae_ckpt, map_location='cpu')
+    vae.load_state_dict(state_dict, strict=True)
 
     mid_reso = 1.125
     final_reso = 256
@@ -198,7 +205,6 @@ if __name__ == '__main__':
 
     img = torch.clamp(img, 0., 1.)
     img = img.add(img).add_(-1)
-    # res, vq_loss, usages = vae.forward(img, ret_usages=True)
     res, vq_loss, entropy_loss, usages = vae.forward(img, ret_usages=True)
     print(res.shape)
     print(usages)
