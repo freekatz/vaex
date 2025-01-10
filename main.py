@@ -103,9 +103,29 @@ def maybe_resume(args: arg_util.Args) -> Tuple[List[str], int, int, str, List[Tu
     return info, ep, it, ckpt.get('acc_str', '[no acc str]'), eval_milestone, ckpt['trainer'], ckpt['args']
 
 
+def maybe_pretrain(args: arg_util.Args) -> dict:
+    pretrain = args.pretrain
+    if pretrain is None or pretrain == '':
+        return {}
+    try:
+        ckpt = torch.load(pretrain, map_location='cpu')
+    except Exception as e:
+        print(f'[pretrain] load failed, {e} @ {pretrain}')
+        return {}
+
+    dist_utils.barrier()
+    trainer_state = {
+        'vae_wo_ddp': ckpt,
+    }
+    print(f'[pretrain] load success @ {pretrain}')
+    return trainer_state
+
+
 def build_things_from_args(args: arg_util.Args):
     # set seed
     auto_resume_info, start_ep, start_it, acc_str, eval_milestone, trainer_state, args_state = maybe_resume(args)
+    if len(trainer_state) == 0:
+        trainer_state = maybe_pretrain(args)
     args.load_state_dict_vae_only(args_state)
     args.diffs = ' '.join([f'{d:.3f}'[2:] for d in eval_milestone])   # args updated
     tb_lg = build_tensorboard_logger(args)

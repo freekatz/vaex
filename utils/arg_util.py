@@ -28,6 +28,7 @@ class Args(Tap):
     exp_name: str       # MUST BE specified as `<tag>-<exp_name>`, e.g., vlip-exp1_cnn_lr1e-4
     bed: str = 'exp'           # Experiment Directory
     resume: str = ''            # if specified, load this checkpoint; if not, load the latest checkpoint in bed (if existing)
+    pretrain: str = ''
     lpips_path: str        # lpips VGG model weights
     dino_path: str         # vit_small_patch16_224.pth model weights
     data_path: str = 'dataset_link' # datasets, split by - or _, o: openimages, cc: cc12m, co: coco, fa: face data(ffhq+HumanArt+afhq+Internal), mj: midjourney, p: pinterest, px: (pexels+pixabay+unsplash)
@@ -221,6 +222,7 @@ class Args(Tap):
                 raise e
     
     def load_state_dict_vae_only(self, d: Union[OrderedDict, dict, str]):
+        if d is None: return
         for k in d.keys():
             if k not in {
                 'vae',  # todo: fill more

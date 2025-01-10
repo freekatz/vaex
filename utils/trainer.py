@@ -300,7 +300,13 @@ class VAETrainer(object):
         return state
     
     def load_state_dict(self, state, strict=True):
-        for k in ('vae_wo_ddp', 'vae_ema', 'disc_wo_ddp', 'vae_opt', 'disc_opt'):
+        if len(state) == 0:
+            return
+        if len(state) == 1:
+            ks = {'vae_wo_ddp'}
+        else:
+            ks =  ('vae_wo_ddp', 'vae_ema', 'disc_wo_ddp', 'vae_opt', 'disc_opt')
+        for k in ks:
             m = getattr(self, k)
             if m is not None:
                 if hasattr(m, '_orig_mod'):
