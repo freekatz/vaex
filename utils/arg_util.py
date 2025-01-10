@@ -58,7 +58,9 @@ class Args(Tap):
     vocab_width: int = 32
     vocab_norm: bool = False
     vq_beta: float = 0.25           # commitment loss weight
-    
+    patch_size: int = 16
+    patch_nums: tuple = ()
+
     # DINO discriminator
     dino_depth: int = 12        # 12: use all layers
     dino_kernel_size: int = 9   # 9 is stylegan-T's setting
@@ -120,6 +122,7 @@ class Args(Tap):
     subset: float = 1.0         # < 1.0 for use subset
     img_size: int = 256
     mid_reso: float = 1.125     # aug: first resize to mid_reso = 1.125 * data_load_reso, then crop to data_load_reso
+    data_load_reso: float = 0     # aug: first resize to mid_reso = 1.125 * data_load_reso, then crop to data_load_reso
     hflip: bool = False         # augmentation: horizontal flip
     workers: int = 8            # num workers; 0: auto, -1: don't use multiprocessing in DataLoader
     
@@ -285,6 +288,19 @@ def init_dist_and_get_args():
     
     if not torch.cuda.is_available() or (not args.bf16 and not args.fp16):
         args.flash_attn = False
+
+    # set model params
+    if args.img_size == 256:
+        pn_str = '1_2_3_4_5_6_8_10_13_16'
+    elif args.img_size == 512:
+        pn_str = '1_2_3_4_6_9_13_18_24_32'
+    elif args.img_size == 1024:
+        pn_str = '1_2_3_4_5_7_9_12_16_21_27_36_48_64'
+    else:
+        raise NotImplementedError
+    args.patch_nums = tuple(map(int, pn_str.replace('-', '_').split('_')))
+    args.resos = tuple(pn * args.patch_size for pn in args.patch_nums)
+    args.data_load_reso = max(args.resos)
     
     # update args: bs, lr, wd
     if args.lbs == 0:

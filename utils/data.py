@@ -33,13 +33,13 @@ def load_pil(path: str, proposal_size):
 
 
 def build_transforms(args: arg_util.Args):
-    final_reso=args.img_size
+    final_reso=args.data_load_reso
     mid_reso=args.mid_reso
     hflip=args.hflip
     dataset_name = args.dataset_name
     if dataset_name in ['imagenet', 'ffhq']:
         # build augmentations
-        mid_reso = round(min(mid_reso, 2) * final_reso)  # first resize to mid_reso, then crop to final_reso
+        mid_reso = round(mid_reso * final_reso)  # first resize to mid_reso, then crop to final_reso
         train_aug = [
             transforms.Resize(mid_reso, interpolation=InterpolationMode.LANCZOS),
             # transforms.Resize: resize the shorter edge to mid_reso

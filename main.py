@@ -271,7 +271,7 @@ def train_one_ep(ep: int, is_first_ep: bool, start_it: int, args: arg_util.Args,
                     f"speed: {iter_speed:.3f} ({min(tails):.3f}~{max(tails):.2f}) sec/iter  |  "
                     f"{img_per_sec:.1f} imgs/sec  |  "
                     f"{img_per_day:.2f}M imgs/day  |  "
-                    f"{img_per_day*(args.img_size//trainer.vae_wo_ddp.downsample_ratio)**2/1e3:.2f}B token/day  ||  "
+                    f"{img_per_day*(args.img_size//trainer.vae_wo_ddp.downsample)**2/1e3:.2f}B token/day  ||  "
                     f"Peak nvidia-smi: {args.max_nvidia_smi:.2f} GB  ||  "
                     f"PyTorch mem - "
                     f"alloc: {memory_allocated:.2f}  |  "

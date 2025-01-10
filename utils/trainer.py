@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from matplotlib.colors import ListedColormap
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from models import VectorQuantizer, VQVAE, DinoDisc
+from models import VectorQuantizer2, VQVAE, DinoDisc
 from utils import arg_util, misc, nan
 from utils.amp_opt import AmpOptimizer
 from utils.diffaug import DiffAug
@@ -87,7 +87,7 @@ class VAETrainer(object):
         with maybe_record_function('VAE_rec'):
             with self.vae_opt.amp_ctx:
                 self.vae_wo_ddp.forward
-                rec_B3HW, Lq, Le, usage = self.vae(inp, ret_usages=loggable)
+                rec_B3HW, Lq, usage = self.vae(inp, ret_usages=loggable)
                 B = rec_B3HW.shape[0]
                 inp_rec_no_grad = torch.cat((inp, rec_B3HW.data), dim=0)
             
@@ -146,9 +146,11 @@ class VAETrainer(object):
                             w = self.ema_gada
                     wei_g = wei_g * w
                 
-                Lv = Lnll + Lq + self.wei_entropy * Le + wei_g * Lg
+                # Lv = Lnll + Lq + self.wei_entropy * Le + wei_g * Lg
+                Lv = Lnll + Lq + wei_g * Lg
         else:
-            Lv = Lnll + Lq + self.wei_entropy * Le
+            # Lv = Lnll + Lq + self.wei_entropy * Le
+            Lv = Lnll + Lq
             Lg = torch.tensor(0.)
             wei_g = None
         
@@ -220,8 +222,9 @@ class VAETrainer(object):
             
             # [tensorboard logging]
             if loggable:
-                Lbcr, Lq, Le, Lg = Lbcr.item(), Lq.item(), Le if isinstance(Le, (int, float)) else Le.item(), Lg.item()
-                
+                # Lbcr, Lq, Le, Lg = Lbcr.item(), Lq.item(), Le if isinstance(Le, (int, float)) else Le.item(), Lg.item()
+                Lbcr, Lq, Lg = Lbcr.item(), Lq.item(), Lg.item()
+
                 # vae_vocab_size = self.vae_wo_ddp.vocab_size
                 # prob_per_class_is_chosen = idx_N.bincount()
                 # prob_per_class_is_chosen = F.pad(prob_per_class_is_chosen, pad=(0, vae_vocab_size-prob_per_class_is_chosen.shape[0]), mode='constant', value=0).float() / prob_per_class_is_chosen.sum()
@@ -233,7 +236,7 @@ class VAETrainer(object):
                     # z_log_perplex=log_perplexity, z_voc_usage=cluster_usage
                 )
                 kw[f'z_voc_usage'] = usage
-                if Le > 1e-6: kw['entropy'] = Le
+                # if Le > 1e-6: kw['entropy'] = Le
                 if Lpip > 1e-6: kw['Lpip'] = Lpip
                 tb_lg.update(head='PT_iter_V_loss', step=g_it, **kw)
                 
@@ -270,7 +273,7 @@ class VAETrainer(object):
         for p_ema, p in zip(self.vae_ema.buffers(), self.vae_wo_ddp.buffers()):
             p_ema.data.copy_(p.data)
         quant, quant_ema = self.vae_wo_ddp.quantize, self.vae_ema.quantize
-        quant: VectorQuantizer
+        quant: VectorQuantizer2
         if hasattr(quant, 'using_ema') and quant.using_ema: # then embedding.weight requires no grad, thus is not in self.vae_ema_params; so need to update it manually
             if hasattr(quant, 'using_restart') and quant.using_restart:
                 # cannot use ema, cuz quantize.embedding uses replacement (rand restart)
