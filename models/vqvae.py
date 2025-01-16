@@ -117,17 +117,17 @@ if __name__ == '__main__':
                 transforms.ToTensor()
             ]
         )
-        # mid_reso = 1.125
-        # final_reso = 256
-        # mid_reso = round(min(mid_reso, 2) * final_reso)
-        # ori_aug = transforms.Compose(
-        #     [
-        #         transforms.Resize(mid_reso, interpolation=InterpolationMode.LANCZOS),
-        #         transforms.CenterCrop((final_reso, final_reso)),
-        #         # transforms.Resize(final_reso, interpolation=InterpolationMode.LANCZOS),
-        #         transforms.ToTensor(), normalize_01_into_pm1
-        #     ]
-        # )
+        mid_reso = 1.125
+        final_reso = 256
+        mid_reso = round(min(mid_reso, 2) * final_reso)
+        ori_aug = transforms.Compose(
+            [
+                transforms.Resize(mid_reso, interpolation=InterpolationMode.LANCZOS),
+                transforms.CenterCrop((final_reso, final_reso)),
+                # transforms.Resize(final_reso, interpolation=InterpolationMode.LANCZOS),
+                transforms.ToTensor(), normalize_01_into_pm1
+            ]
+        )
         img_list = glob.glob(f'{img_folder}/*.png')
         img_all = []
         ori_img_all = []
@@ -171,6 +171,22 @@ if __name__ == '__main__':
     )
     origin_img, img = img_folder_to_tensor('../tmp', aug, img_size=final_reso)
     print(img.shape)
+
+    # ex = vae.encoder(img)
+    # print('ex', ex.shape)
+    # x = vae.quant_conv(ex)
+    # print('x', x.shape)
+    # idx_gt = vae.quantize.f_to_idxBl_or_fhat(x, to_fhat=False)
+    # for idx in idx_gt:
+    #     print('idx', idx.shape)
+    # gt = torch.cat(idx_gt, dim=1)
+    # print(gt.shape)
+    # quant_feat_gt = vae.quantize.f_to_idxBl_or_fhat(x, to_fhat=True)
+    # quant_feat = torch.cat(quant_feat_gt, dim=1)
+    # print(quant_feat.shape)
+    #
+    # idx_imp = vae.quantize.idxBl_to_var_input(idx_gt)
+    # print(idx_imp.shape)
 
     in_img = tensor_to_img(origin_img)
     in_img.save('../inp.png')
