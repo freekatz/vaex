@@ -19,7 +19,7 @@ class NullCtx:
 class AmpOptimizer:
     def __init__(
         self,
-        model_name_3letters: str, model_maybe_fsdp: Union[torch.nn.Module, FSDP], fp16: bool, bf16: bool, zero: int,
+        model_name_3letters: str, model_maybe_fsdp: Union[torch.nn.Module, FSDP, None], fp16: bool, bf16: bool, zero: int,
         optimizer: torch.optim.Optimizer, grad_clip: float, n_gradient_accumulation: int = 1,
     ):
         self.model_name_3letters = model_name_3letters

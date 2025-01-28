@@ -10,8 +10,8 @@ import torch.nn.functional as F
 import torchvision
 from matplotlib.colors import ListedColormap
 
-from dist import for_visualize
-from trainer import VAETrainer
+from dist_utils import for_visualize
+from utils.trainer import VAETrainer
 from utils import misc
 
 

@@ -21,17 +21,19 @@ except ImportError as e:
     time.sleep(5)
     raise e
 
-import dist
+from utils import dist_utils
+
 
 class Args(Tap):
-    exp_name: str       # MUST BE specified as `<tag>-<exp_name>`, e.g., vlip-exp1_cnn_lr1e-4
-    bed: str            # MUST BE specified, Bytenas Experiment Directory
+    exp_name: str = 'test'       # MUST BE specified as `<tag>-<exp_name>`, e.g., vlip-exp1_cnn_lr1e-4
+    bed: str = 'exp'           # Experiment Directory
     resume: str = ''            # if specified, load this checkpoint; if not, load the latest checkpoint in bed (if existing)
-    lpips_path: str = ''        # lpips VGG model weights
-    dino_path: str = ''         # vit_small_patch16_224.pth model weights
-    val_img_pattern: str = ''
-    data: str = 'o_cc' # datasets, split by - or _, o: openimages, cc: cc12m, co: coco, fa: face data(ffhq+HumanArt+afhq+Internal), mj: midjourney, p: pinterest, px: (pexels+pixabay+unsplash)
-    
+    pretrain: str = ''
+    lpips_path: str        # lpips VGG model weights
+    dino_path: str         # vit_small_patch16_224.pth model weights
+    data_path: str = 'dataset_link' # datasets, split by - or _, o: openimages, cc: cc12m, co: coco, fa: face data(ffhq+HumanArt+afhq+Internal), mj: midjourney, p: pinterest, px: (pexels+pixabay+unsplash)
+    dataset_name: str = 'ffhq_blind'
+
     # speed-up: torch.compile
     zero: int = 0               # todo: FSDP zero 2/3
     compile_vae: int = 0        # torch.compile VAE; =0: not compile; 1: compile with 'reduce-overhead'; 2: compile with 'max-autotune'
@@ -45,8 +47,7 @@ class Args(Tap):
     grad_accu: int = 1      # gradient accumulation
     prof: bool = False      # whether to do profile
     profall: bool = False   # whether to do profile on all ranks
-    tos_profiler_file_prefix: str = ''
-    
+
     # VAE: vitamin or cnn
     vae: str = 'cnn'        # 's', 'b', 'l' for using vitamin; 'cnn', 'conv', or '' for using CNN
     drop_path: float = 0.1  # following https://github.com/Beckschen/ViTamin/blob/76f1b1524ce03fcaa3449c7db678711f0961ebc2/ViTamin/open_clip/model_configs/ViTamin-L.json#L9
@@ -58,7 +59,9 @@ class Args(Tap):
     vocab_width: int = 32
     vocab_norm: bool = False
     vq_beta: float = 0.25           # commitment loss weight
-    
+    patch_size: int = 16
+    patch_nums: tuple = ()
+
     # DINO discriminator
     dino_depth: int = 12        # 12: use all layers
     dino_kernel_size: int = 9   # 9 is stylegan-T's setting
@@ -120,19 +123,9 @@ class Args(Tap):
     subset: float = 1.0         # < 1.0 for use subset
     img_size: int = 256
     mid_reso: float = 1.125     # aug: first resize to mid_reso = 1.125 * data_load_reso, then crop to data_load_reso
+    data_load_reso: float = 0     # aug: first resize to mid_reso = 1.125 * data_load_reso, then crop to data_load_reso
     hflip: bool = False         # augmentation: horizontal flip
     workers: int = 8            # num workers; 0: auto, -1: don't use multiprocessing in DataLoader
-    
-    # debug
-    local_debug: bool = 'KEVIN_LOCAL' in os.environ
-    dbg_unused: bool = False
-    dbg_nan: bool = False   # 'KEVIN_LOCAL' in os.environ
-    
-    # would be automatically set in runtime
-    cmd: str = ' '.join(sys.argv[1:])  # [automatically set; don't specify this]
-    branch: str = subprocess.check_output(f'git symbolic-ref --short HEAD 2>/dev/null || git rev-parse HEAD', shell=True).decode('utf-8').strip() or '[unknown]' # [automatically set; don't specify this]
-    commit_id: str = subprocess.check_output(f'git rev-parse HEAD', shell=True).decode('utf-8').strip() or '[unknown]'  # [automatically set; don't specify this]
-    commit_msg: str = (subprocess.check_output(f'git log -1', shell=True).decode('utf-8').strip().splitlines() or ['[unknown]'])[-1].strip()    # [automatically set; don't specify this]
     
     acc_all: float = None   # [automatically set; don't specify this]
     acc_real: float = None  # [automatically set; don't specify this]
@@ -159,7 +152,7 @@ class Args(Tap):
     num_alloc_retries: int = None        # [automatically set; don't specify this]
     
     # environment
-    local_out_dir_path: str = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'local_output')  # [automatically set; don't specify this]
+    local_out_dir_path: str = ''  # [automatically set; don't specify this]
     tb_log_dir_path: str = '...tb-...'  # [automatically set; don't specify this]
     tb_log_dir_online: str = '...tb-...'# [automatically set; don't specify this]
     log_txt_path: str = '...'           # [automatically set; don't specify this]
@@ -167,7 +160,7 @@ class Args(Tap):
     
     tf32: bool = True       # whether to use TensorFloat32
     device: str = 'cpu'     # [automatically set; don't specify this]
-    seed: int = None        # seed
+    seed: int = np.random.randint(1, 10000)        # seed
     deterministic: bool = False
     same_seed_for_all_ranks: int = 0     # this is only for distributed sampler
     def seed_everything(self):
@@ -181,22 +174,23 @@ class Args(Tap):
                 torch.backends.cudnn.deterministic = True
                 torch.use_deterministic_algorithms(True)
                 os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':16:8'
-            seed = self.seed + dist.get_rank()*16384
+            seed = self.seed + dist_utils.get_rank()*16384
             os.environ['PYTHONHASHSEED'] = str(seed)
             random.seed(seed)
             np.random.seed(seed)
             torch.manual_seed(seed)
             torch.cuda.manual_seed(seed)
             torch.cuda.manual_seed_all(seed)
+            self.same_seed_for_all_ranks = seed
     
     def get_different_generator_for_each_rank(self) -> Optional[torch.Generator]:   # for random augmentation
         if self.seed is None: return None
         g = torch.Generator()
-        g.manual_seed(self.seed * dist.get_world_size() + dist.get_rank())
+        g.manual_seed(self.seed * dist_utils.get_world_size() + dist_utils.get_rank())
         return g
     
     def compile_model(self, m, fast):
-        if fast == 0 or self.local_debug or not hasattr(torch, 'compile'):
+        if fast == 0 or not hasattr(torch, 'compile'):
             return m
         mode = {
             1: 'reduce-overhead',
@@ -228,6 +222,7 @@ class Args(Tap):
                 raise e
     
     def load_state_dict_vae_only(self, d: Union[OrderedDict, dict, str]):
+        if d is None: return
         for k in d.keys():
             if k not in {
                 'vae',  # todo: fill more
@@ -265,24 +260,6 @@ def init_dist_and_get_args():
             del sys.argv[i]
             break
     args = Args(explicit_bool=True).parse_args(known_only=True)
-    if args.local_debug:
-        args.bed = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'bed')
-        args.lpips_path = r'C:\Users\16333\Desktop\PyCharm\vgpt\_vae\lpips_with_vgg.pth'
-        args.dino_path = r'C:\Users\16333\Desktop\PyCharm\vgpt\_vae\vit_small_patch16_224.pth'
-        args.val_img_pattern = r'C:\Users\16333\Desktop\PyCharm\vgpt\_vae\val_imgs\v*'
-        args.seed, args.deterministic = 1, True
-        args.vae_init = args.disc_init = -0.5
-        
-        args.img_size = 64
-        args.vae = 'cnn'
-        args.ch = 32
-        args.vocab_width = 16
-        args.vocab_size = 4096
-        args.disc_norm = 'gn'
-        args.dino_depth = 3
-        args.dino_kernel_size = 1
-        args.vae_opt_beta = args.disc_opt_beta = '0.5_0.9'
-        args.l2, args.l1, args.ll, args.le = 1.0, 0.2, 0.0, 0.1
     
     # warn args.extra_args
     if len(args.extra_args) > 0:
@@ -290,39 +267,47 @@ def init_dist_and_get_args():
         print(f'=========================== WARNING: UNEXPECTED EXTRA ARGS ===========================\n{args.extra_args}')
         print(f'=========================== WARNING: UNEXPECTED EXTRA ARGS ===========================')
         print(f'======================================================================================\n\n')
-    
+
+    # update args: paths
+    assert args.bed
+    assert args.exp_name
+    args.bed = osp.join(args.bed, f'{args.exp_name}')
+    args.bed = args.bed.rstrip(osp.sep)
+    os.makedirs(args.bed, exist_ok=True)
+    assert args.lpips_path
+    assert args.dino_path
+
     # init torch distributed
     from utils import misc
+    args.local_out_dir_path = os.path.join(args.bed, 'local_output')
     os.makedirs(args.local_out_dir_path, exist_ok=True)
-    dist.init_distributed_mode(local_out_path=args.local_out_dir_path, timeout_minutes=30)
+    dist_utils.init_distributed_mode(local_out_path=args.local_out_dir_path, timeout_minutes=30)
     
     # set env
     args.set_tf32(args.tf32)
     args.seed_everything()
-    args.device = dist.get_device()
+    args.device = dist_utils.get_device()
     
     if not torch.cuda.is_available() or (not args.bf16 and not args.fp16):
         args.flash_attn = False
-    
-    # update args: paths
-    assert args.bed
-    if args.exp_name not in args.bed:
-        args.bed = osp.join(args.bed, f'{args.exp_name}')
-    args.bed = args.bed.rstrip(osp.sep)
-    os.makedirs(args.bed, exist_ok=True)
-    if not args.lpips_path:
-        args.lpips_path = f'{lyoko.BNAS_DATA}/ckpt_vae/lpips_with_vgg.pth'
-    if not args.dino_path:
-        args.dino_path = f'{lyoko.BNAS_DATA}/ckpt_vae/vit_small_patch16_224.pth'
-    if not args.val_img_pattern:
-        args.val_img_pattern = f'{lyoko.BNAS_DATA}/ckpt_vae/val_imgs/v*'
-    if not args.tos_profiler_file_prefix.endswith('/'):
-        args.tos_profiler_file_prefix += '/'
+
+    # set model params
+    if args.img_size == 256:
+        pn_str = '1_2_3_4_5_6_8_10_13_16'
+    elif args.img_size == 512:
+        pn_str = '1_2_3_4_6_9_13_18_24_32'
+    elif args.img_size == 1024:
+        pn_str = '1_2_3_4_5_7_9_12_16_21_27_36_48_64'
+    else:
+        raise NotImplementedError
+    args.patch_nums = tuple(map(int, pn_str.replace('-', '_').split('_')))
+    args.resos = tuple(pn * args.patch_size for pn in args.patch_nums)
+    args.data_load_reso = max(args.resos)
     
     # update args: bs, lr, wd
     if args.lbs == 0:
-        args.lbs = max(1, round(args.bs / args.grad_accu / dist.get_world_size()))
-    args.bs = args.lbs * dist.get_world_size()
+        args.lbs = max(1, round(args.bs / args.grad_accu / dist_utils.get_world_size()))
+    args.bs = args.lbs * dist_utils.get_world_size()
     args.workers = min(args.workers, args.lbs)
     
     # args.lr = args.grad_accu * args.base_lr * args.glb_batch_size / 256
@@ -347,9 +332,10 @@ def init_dist_and_get_args():
         f'__b{args.bs}ep{args.ep}{args.opt[:4]}vlr{args.vae_lr:g}wd{args.vae_wd:g}dlr{args.disc_lr:g}wd{args.disc_wd:g}'
     )
     
-    if dist.is_master():
+    if dist_utils.is_master():
         os.system(f'rm -rf {os.path.join(args.bed, "ready-node*")} {os.path.join(args.local_out_dir_path, "ready-node*")}')
     
+    args.tb_log_dir_online = args.local_out_dir_path
     args.tb_log_dir_path = os.path.join(args.local_out_dir_path, tb_name)
-    
+
     return args

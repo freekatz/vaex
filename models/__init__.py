@@ -1,12 +1,17 @@
+import os
+import sys
 from typing import Tuple
 
 import torch.nn as nn
 
 from utils.arg_util import Args
-from .quant import VectorQuantizer
+from .quant import VectorQuantizer2
 from .vqvae import VQVAE
 from .dino import DinoDisc
-from .basic_vae import CNNEncoder
+from .basic_vae import Encoder, Decoder
+
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../'))
 
 
 def build_vae_disc(args: Args) -> Tuple[VQVAE, DinoDisc]:
@@ -19,12 +24,10 @@ def build_vae_disc(args: Args) -> Tuple[VQVAE, DinoDisc]:
         setattr(clz, 'reset_parameters', lambda self: None)
     
     # build models
-    vae = VQVAE(
-        grad_ckpt=args.vae_grad_ckpt,
-        vitamin=args.vae, drop_path_rate=args.drop_path,
-        ch=args.ch, ch_mult=(1, 1, 2, 2, 4), dropout=args.drop_out,
-        vocab_size=args.vocab_size, vocab_width=args.vocab_width, vocab_norm=args.vocab_norm, beta=args.vq_beta, quant_conv_k=3, quant_resi=-0.5,
-    ).to(args.device)
+    vae = VQVAE(vocab_size=args.vocab_size, z_channels=args.vocab_width, ch=args.ch,
+                using_znorm=args.vocab_norm, beta=args.vq_beta, dropout=args.drop_out,
+                share_quant_resi=4, quant_conv_ks=3, quant_resi=0.5,
+                v_patch_nums=args.patch_nums, test_mode=False).to(args.device)
     disc = DinoDisc(
         device=args.device, dino_ckpt_path=args.dino_path, depth=args.dino_depth, key_depths=(2, 5, 8, 11),
         ks=args.dino_kernel_size, norm_type=args.disc_norm, using_spec_norm=args.disc_spec_norm, norm_eps=1e-6,
@@ -37,12 +40,12 @@ def build_vae_disc(args: Args) -> Tuple[VQVAE, DinoDisc]:
         vae.post_quant_conv,
         vae.decoder,
     ]
-    if isinstance(vae.encoder, CNNEncoder):
+    if isinstance(vae.encoder, Encoder):
         need_init.insert(0, vae.encoder)
     for vv in need_init:
         init_weights(vv, args.vae_init)
     init_weights(disc, args.disc_init)
-    vae.quantize.init_vocab(args.vocab_init)
+    vae.quantize.eini(args.vocab_init)
     
     return vae, disc
 

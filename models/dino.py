@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from torch.nn.utils.spectral_norm import SpectralNorm
 from torchvision.transforms import RandomCrop
 
-import dist
+from utils import dist_utils
 
 try:
     from flash_attn.ops.layer_norm import dropout_add_layer_norm
@@ -153,7 +153,7 @@ class BatchNormLocal(nn.Module):
 def make_block(channels: int, kernel_size: int, norm_type: str, norm_eps: float, using_spec_norm: bool) -> nn.Module:
     if norm_type == 'bn': norm = BatchNormLocal(channels, eps=norm_eps)
     elif norm_type == 'sbn': norm = nn.SyncBatchNorm(channels, eps=norm_eps, process_group=None)
-    elif norm_type in {'lbn', 'hbn'}: norm = nn.SyncBatchNorm(channels, eps=norm_eps, process_group=dist.new_local_machine_group())
+    elif norm_type in {'lbn', 'hbn'}: norm = nn.SyncBatchNorm(channels, eps=norm_eps, process_group=dist_utils.new_local_machine_group())
     elif norm_type == 'gn': norm = nn.GroupNorm(num_groups=32, num_channels=channels, eps=norm_eps, affine=True)
     else: raise NotImplementedError
     

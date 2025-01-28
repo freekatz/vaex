@@ -14,7 +14,7 @@ import pytz
 import torch
 import torch.distributed as tdist
 
-import dist
+from utils import dist_utils
 from utils import arg_util
 
 os_system = functools.partial(subprocess.call, shell=True)
@@ -265,7 +265,7 @@ class TouchingDaemonDontForgetToStartMe(threading.Thread):
     def run(self) -> None:
         # stt, logged = time.time(), False
         kw = {}
-        if dist.initialized(): kw['clean'] = True
+        if dist_utils.initialized(): kw['clean'] = True
         
         stt = time.time()
         if self.verbose: print(f'{time_str()}{self.print_prefix}[TouchingDaemon tid={threading.get_native_id()}] start touching {self.files} per {self.sleep_secs}s ...', **kw)

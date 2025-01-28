@@ -9,21 +9,36 @@ class LPIPS(nn.Module):
     def __init__(self, lpips_path, use_dropout=False):    # do not use dropout by default because we use .eval mode by default
         super().__init__()
         # build models
-        self.net = Vgg16(requires_grad=False)
-        self.lins = nn.ModuleList([NetLinLayer(c, use_dropout=use_dropout) for c in [64, 128, 256, 512, 512]])  # c: vgg16 feature dimensions
-        
+        pretrained = True
+        state_dict = torch.load(lpips_path, map_location='cpu')
+        for key in state_dict.keys():
+            if key.startswith('net.'):
+                pretrained = False
+        if pretrained:
+            print('[LPIPS] warn: will load net from pretrained weights')
+        self.net = Vgg16(requires_grad=False, pretrained=pretrained)
+
+        self.lin0 = NetLinLayer(64, use_dropout=use_dropout)
+        self.lin1 = NetLinLayer(128, use_dropout=use_dropout)
+        self.lin2 = NetLinLayer(256, use_dropout=use_dropout)
+        self.lin3 = NetLinLayer(512, use_dropout=use_dropout)
+        self.lin4 = NetLinLayer(512, use_dropout=use_dropout)
+        self.lins = nn.ModuleList([self.lin0, self.lin1, self.lin2, self.lin3, self.lin4])
+
         # detach parameters & set to eval mode
         for param in self.parameters():
             param.requires_grad = False
         self.eval()
-        
-        # load weights
-        self.load_state_dict(torch.load(lpips_path, map_location='cpu'), strict=True)
-        
+
+        if not pretrained:
+            self.load_state_dict(state_dict, strict=True)
+        else:
+            self.load_state_dict(state_dict, strict=False)
+
         # register helper tensors
         self.register_buffer('shift', torch.tensor([-.030, -.088, -.188], dtype=torch.float32).view(1, 3, 1, 1).contiguous())
         self.register_buffer('scale_inv', 1. / torch.tensor([.458, .448, .450], dtype=torch.float32).view(1, 3, 1, 1).contiguous())
-    
+
     def forward(self, inp, rec):
         """
         :param inp: image for calculating LPIPS loss, [-1, 1]
@@ -49,19 +64,29 @@ class NetLinLayer(nn.Module):
 
 
 class Vgg16(torch.nn.Module):
-    def __init__(self, requires_grad=False):
+    def __init__(self, requires_grad=False, pretrained=False):
         super(Vgg16, self).__init__()
-        vgg_pretrained_features = models.vgg16().features
-        self.slice1 = torch.nn.Sequential(*[vgg_pretrained_features[x] for x in range(4)])
-        self.slice2 = torch.nn.Sequential(*[vgg_pretrained_features[x] for x in range(4, 9)])
-        self.slice3 = torch.nn.Sequential(*[vgg_pretrained_features[x] for x in range(9, 16)])
-        self.slice4 = torch.nn.Sequential(*[vgg_pretrained_features[x] for x in range(16, 23)])
-        self.slice5 = torch.nn.Sequential(*[vgg_pretrained_features[x] for x in range(23, 30)])
+        vgg_pretrained_features = models.vgg16(pretrained=pretrained).features
+        self.slice1 = torch.nn.Sequential()
+        self.slice2 = torch.nn.Sequential()
+        self.slice3 = torch.nn.Sequential()
+        self.slice4 = torch.nn.Sequential()
+        self.slice5 = torch.nn.Sequential()
         self.N_slices = 5
+        for x in range(4):
+            self.slice1.add_module(str(x), vgg_pretrained_features[x])
+        for x in range(4, 9):
+            self.slice2.add_module(str(x), vgg_pretrained_features[x])
+        for x in range(9, 16):
+            self.slice3.add_module(str(x), vgg_pretrained_features[x])
+        for x in range(16, 23):
+            self.slice4.add_module(str(x), vgg_pretrained_features[x])
+        for x in range(23, 30):
+            self.slice5.add_module(str(x), vgg_pretrained_features[x])
         if not requires_grad:
             for param in self.parameters():
                 param.requires_grad = False
-    
+
     def forward(self, x):
         h_relu1_2 = self.slice1(x)
         h_relu2_2 = self.slice2(h_relu1_2)
@@ -79,24 +104,14 @@ def normalize_tensor(x, eps=1e-10):
     return x / (norm_factor + eps)
 
 
-def main():
-    from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
-    
-    l = LPIPS(r'C:\Users\16333\Desktop\PyCharm\vgpt\_vqgan\lpips_with_vgg.pth', IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD, use_dropout=False)
-    # s = l.state_dict()
-    # for k in ['data_m', 'data_s', 'vgg_inp_m', 'vgg_inp_s_inv']:
-    #     s.pop(k)
-    # torch.save(s, r'C:\Users\16333\Desktop\PyCharm\vgpt\_vqgan\lpips_with_vgg.pth')
-    x, y = torch.load(r'C:\Users\16333\Desktop\PyCharm\vgpt\_vqgan\x.pth'), torch.load(r'C:\Users\16333\Desktop\PyCharm\vgpt\_vqgan\y.pth')
-    y.requires_grad_(True)
-    loss = l(x, y)
-    print(f'loss.shape: {loss.shape}')
-    loss.mean().backward()
-    a, b = loss.data.flatten()
-    a, b = round(a.item(), 4), round(b.item(), 4)
-    assert a == 0.2965, a
-    assert b == 0.3166, b
-
-
 if __name__ == '__main__':
-    main()
+    from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
+
+    l = LPIPS(r'/Users/katz/Downloads/lpips_with_vgg.pth', use_dropout=False)
+    s = l.state_dict()
+    print(s.keys())
+
+    # for k in ['shift', 'scale_inv']:
+    #     s.pop(k)
+    # torch.save(s, r'/Users/katz/Downloads/lpips_with_vgg.pth')
+

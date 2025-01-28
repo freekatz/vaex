@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from matplotlib.colors import ListedColormap
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from models import VectorQuantizer, VQVAE, DinoDisc
+from models import VectorQuantizer2, VQVAE, DinoDisc
 from utils import arg_util, misc, nan
 from utils.amp_opt import AmpOptimizer
 from utils.diffaug import DiffAug
@@ -30,15 +30,9 @@ class VAETrainer(object):
         dcrit: str, vae_opt: AmpOptimizer, disc_opt: AmpOptimizer,
         daug=1.0, lpips_loss: LPIPS = None, lp_reso=64, wei_l1=1.0, wei_l2=0.0, wei_entropy=0.0, wei_lpips=0.5, wei_disc=0.6, adapt_type=1, bcr=5.0, bcr_cut=0.5, reg=0.0, reg_every=16,
         disc_grad_ckpt=False,
-        dbg_unused=False, dbg_nan=False,
     ):
         super(VAETrainer, self).__init__()
-        self.dbg_unused, self.dbg_nan = dbg_unused, dbg_nan
-        if self.dbg_nan:
-            print('[dbg_nan mode on]')
-            nan.debug_nan_hook(vae)
-            nan.debug_nan_hook(disc)
-        
+
         self.vae, self.disc = vae, disc
         self.vae_opt, self.disc_opt = vae_opt, disc_opt
         self.vae_wo_ddp: VQVAE = vae_wo_ddp  # after torch.compile
@@ -81,7 +75,7 @@ class VAETrainer(object):
     # @profile(precision=4, stream=open('trainstep.log', 'w+'))
     def train_step(
         self, ep: int, it: int, g_it: int, stepping: bool, regularizing: bool, metric_lg: misc.MetricLogger, logging_params: bool, tb_lg: misc.TensorboardLogger,
-        inp: FTen, warmup_disc_schedule: float, fade_blur_schedule: float,
+        lq: FTen, hq: FTen, warmup_disc_schedule: float, fade_blur_schedule: float,
         maybe_record_function: Callable,
         args: arg_util.Args,
     ) -> Tuple[torch.Tensor, Optional[float], Optional[torch.Tensor], Optional[float]]:
@@ -93,15 +87,15 @@ class VAETrainer(object):
         with maybe_record_function('VAE_rec'):
             with self.vae_opt.amp_ctx:
                 self.vae_wo_ddp.forward
-                rec_B3HW, Lq, Le, usage = self.vae(inp, ret_usages=loggable)
+                rec_B3HW, Lq, usage = self.vae(lq, hq, ret_usages=loggable)
                 B = rec_B3HW.shape[0]
-                inp_rec_no_grad = torch.cat((inp, rec_B3HW.data), dim=0)
+                inp_rec_no_grad = torch.cat((hq, rec_B3HW.data), dim=0)
             
-            Lrec = F.l1_loss(rec_B3HW, inp)
+            Lrec = F.l1_loss(rec_B3HW, hq)
             Lrec_for_log = Lrec.data.clone()
             Lrec *= self.wei_l1
             if self.wei_l2 > 0:
-                Lrec += F.mse_loss(rec_B3HW, inp).mul_(self.wei_l2)
+                Lrec += F.mse_loss(rec_B3HW, hq).mul_(self.wei_l2)
             # if self.wei_llaplace > 0:
             #     inp_01_09 = inp.mul(0.4).add_(0.5)
             #     dist = (rec_B3HW.sigmoid() - inp_01_09.sigmoid()).abs()
@@ -109,10 +103,10 @@ class VAETrainer(object):
             #     dist /= inp_01_09.add(inp_01_09).mul_(1-inp_01_09).add_(1).mul_(0.5)
             #     Lrec += dist.mean().mul_(self.wei_llaplace)
             
-            using_lpips = inp.shape[-2] >= self.lp_reso and self.wei_lpips > 0
+            using_lpips = hq.shape[-2] >= self.lp_reso and self.wei_lpips > 0
             if using_lpips:
                 self.lpips_loss.forward
-                Lpip = self.lpips_loss(inp, rec_B3HW)
+                Lpip = self.lpips_loss(hq, rec_B3HW)
                 Lnll = Lrec + self.wei_lpips * Lpip
             else:
                 Lpip = torch.tensor(0.)
@@ -152,9 +146,11 @@ class VAETrainer(object):
                             w = self.ema_gada
                     wei_g = wei_g * w
                 
-                Lv = Lnll + Lq + self.wei_entropy * Le + wei_g * Lg
+                # Lv = Lnll + Lq + self.wei_entropy * Le + wei_g * Lg
+                Lv = Lnll + Lq + wei_g * Lg
         else:
-            Lv = Lnll + Lq + self.wei_entropy * Le
+            # Lv = Lnll + Lq + self.wei_entropy * Le
+            Lv = Lnll + Lq
             Lg = torch.tensor(0.)
             wei_g = None
         
@@ -186,21 +182,21 @@ class VAETrainer(object):
             else:
                 Lbcr = torch.tensor(0.)
             
-            if regularizing:
-                with maybe_record_function('Disc_reg'):
-                    self.disc_wo_ddp.eval()
-                    with torch.cuda.amp.autocast(enabled=False):    # todo: why AMP is disabled in this disc forward?
-                        inp.requires_grad_(True)
-                        self.disc_wo_ddp.forward
-                        grad_real = torch.autograd.grad(outputs=self.disc(self.daug.aug(inp, fade_blur_schedule), grad_ckpt=False).sum(), inputs=inp, create_graph=True)[0]
-                        Lreg = grad_real.square().flatten(1).sum(dim=1).mean()
-                        Ld += self.reg * Lreg
-                        Lreg = Lreg.item()
-                        inp.requires_grad_(False)
-                    self.disc_wo_ddp.train()
-            else:
-                Lreg = 0.
-            
+            # if regularizing:
+            #     with maybe_record_function('Disc_reg'):
+            #         self.disc_wo_ddp.eval()
+            #         with torch.cuda.amp.autocast(enabled=False):    # todo: why AMP is disabled in this disc forward?
+            #             inp.requires_grad_(True)
+            #             self.disc_wo_ddp.forward
+            #             grad_real = torch.autograd.grad(outputs=self.disc(self.daug.aug(inp, fade_blur_schedule), grad_ckpt=False).sum(), inputs=inp, create_graph=True)[0]
+            #             Lreg = grad_real.square().flatten(1).sum(dim=1).mean()
+            #             Ld += self.reg * Lreg
+            #             Lreg = Lreg.item()
+            #             inp.requires_grad_(False)
+            #         self.disc_wo_ddp.train()
+            # else:
+            #     Lreg = 0.
+            Lreg = 0.
             with maybe_record_function('Disc_backward'):
                 grad_norm_d, scale_log2_d = self.disc_opt.backward_clip_step(stepping=stepping, loss=Ld)
                 Ld = Ld.data.clone()
@@ -213,21 +209,6 @@ class VAETrainer(object):
             if self.using_ema:
                 with maybe_record_function('EMA_upd'):
                     self.ema_update(g_it)
-            
-            if self.dbg_nan:
-                nan.debug_nan_grad(self.vae_wo_ddp), nan.debug_nan_grad(self.disc_wo_ddp)
-                nan.debug_nan_param(self.vae_wo_ddp), nan.debug_nan_param(self.disc_wo_ddp)
-            if self.dbg_unused:
-                ls = []
-                for n, p in self.vae_wo_ddp.named_parameters():
-                    if p.grad is None and n not in {'quantize.embedding.weight'}: # or tuple(p.grad.shape) == (512, 512, 1, 1):
-                        ls.append(n)
-                for n, p in self.disc_wo_ddp.named_parameters():
-                    if p.grad is None: # or tuple(p.grad.shape) == (512, 512, 1, 1):
-                        ls.append(n)
-                if len(ls):
-                    print(f'unused param: {ls}', flush=True, file=sys.stderr)
-            
             with maybe_record_function('opt_step'):
                 self.vae_opt.optimizer.zero_grad(set_to_none=True)
                 self.disc_opt.optimizer.zero_grad(set_to_none=True)
@@ -241,8 +222,9 @@ class VAETrainer(object):
             
             # [tensorboard logging]
             if loggable:
-                Lbcr, Lq, Le, Lg = Lbcr.item(), Lq.item(), Le if isinstance(Le, (int, float)) else Le.item(), Lg.item()
-                
+                # Lbcr, Lq, Le, Lg = Lbcr.item(), Lq.item(), Le if isinstance(Le, (int, float)) else Le.item(), Lg.item()
+                Lbcr, Lq, Lg = Lbcr.item(), Lq.item(), Lg.item()
+
                 # vae_vocab_size = self.vae_wo_ddp.vocab_size
                 # prob_per_class_is_chosen = idx_N.bincount()
                 # prob_per_class_is_chosen = F.pad(prob_per_class_is_chosen, pad=(0, vae_vocab_size-prob_per_class_is_chosen.shape[0]), mode='constant', value=0).float() / prob_per_class_is_chosen.sum()
@@ -254,7 +236,7 @@ class VAETrainer(object):
                     # z_log_perplex=log_perplexity, z_voc_usage=cluster_usage
                 )
                 kw[f'z_voc_usage'] = usage
-                if Le > 1e-6: kw['entropy'] = Le
+                # if Le > 1e-6: kw['entropy'] = Le
                 if Lpip > 1e-6: kw['Lpip'] = Lpip
                 tb_lg.update(head='PT_iter_V_loss', step=g_it, **kw)
                 
@@ -291,7 +273,7 @@ class VAETrainer(object):
         for p_ema, p in zip(self.vae_ema.buffers(), self.vae_wo_ddp.buffers()):
             p_ema.data.copy_(p.data)
         quant, quant_ema = self.vae_wo_ddp.quantize, self.vae_ema.quantize
-        quant: VectorQuantizer
+        quant: VectorQuantizer2
         if hasattr(quant, 'using_ema') and quant.using_ema: # then embedding.weight requires no grad, thus is not in self.vae_ema_params; so need to update it manually
             if hasattr(quant, 'using_restart') and quant.using_restart:
                 # cannot use ema, cuz quantize.embedding uses replacement (rand restart)
@@ -318,7 +300,13 @@ class VAETrainer(object):
         return state
     
     def load_state_dict(self, state, strict=True):
-        for k in ('vae_wo_ddp', 'vae_ema', 'disc_wo_ddp', 'vae_opt', 'disc_opt'):
+        if len(state) == 0:
+            return
+        if len(state) == 1:
+            ks = {'vae_wo_ddp'}
+        else:
+            ks =  ('vae_wo_ddp', 'vae_ema', 'disc_wo_ddp', 'vae_opt', 'disc_opt')
+        for k in ks:
             m = getattr(self, k)
             if m is not None:
                 if hasattr(m, '_orig_mod'):
