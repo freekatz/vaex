@@ -214,8 +214,37 @@ if __name__ == '__main__':
     import torch
 
     from utils import dist_utils
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--data', type=str)
+    parser.add_argument('--ckpt', type=str)
+    args = parser.parse_args()
 
-    dist_utils.init_distributed_mode(local_out_path='../tmp', timeout_minutes=30)
+    device = 'cpu'
+    # dist_utils.init_distributed_mode(local_out_path='../tmp', timeout_minutes=30)
+
+    seed = args.seed
+    import random
+    def seed_everything(self):
+        torch.backends.cudnn.enabled = True
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.deterministic = False
+        if self.seed is not None:
+            print(f'[in seed_everything] {self.deterministic=}', flush=True)
+            if self.deterministic:
+                torch.backends.cudnn.benchmark = False
+                torch.backends.cudnn.deterministic = True
+                torch.use_deterministic_algorithms(True)
+                os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':16:8'
+            seed = self.seed + dist_utils.get_rank()*16384
+            os.environ['PYTHONHASHSEED'] = str(seed)
+            random.seed(seed)
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+            torch.cuda.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed)
+            self.same_seed_for_all_ranks = seed
 
     def normalize_01_into_pm1(x):  # normalize x from [0, 1] to [-1, 1] by (x*2) - 1
         return x.add(x).add_(-1)
@@ -268,10 +297,10 @@ if __name__ == '__main__':
     from pathlib import Path
     import os
     root = Path(os.path.dirname(__file__)).parent
-    vae_ckpt = sys.argv[1]
+    vae_ckpt = args.ckpt
     B, C, H, W = 4, 3, 256, 256
     vae = VQVAE(vocab_size=4096, z_channels=32, ch=160, test_mode=True,
-                share_quant_resi=4, v_patch_nums=(1, 2, 3, 4, 5, 6, 8, 10, 13, 16)).to('cpu')
+                share_quant_resi=4, v_patch_nums=(1, 2, 3, 4, 5, 6, 8, 10, 13, 16)).to(device)
     vae.eval()
 
     # trainer
@@ -293,20 +322,27 @@ if __name__ == '__main__':
         'kernel_prob': [0.5, 0.5],
         'blur_sigma': [1, 15],
         'downsample_range': [4, 30],
-        'noise_range': [0, 1],
+        'noise_range': [0, 20],
         'jpeg_range': [30, 80],
-        'use_hflip': True,
+        # 'color_jitter_prob': 0.3,  # TODO 搞清楚这些数据增强
+        # 'color_jitter_shift': 20,
+        # 'color_jitter_pt_prob': 0.3,
+        # 'gray_prob': 0.01,
     }
     final_reso = 256
     mid_reso = 1.125
     # build augmentations
     mid_reso = round(mid_reso * final_reso)  # first resize to mid_reso, then crop to final_reso
     train_lq_aug = [
-        transforms.Resize((final_reso, final_reso), interpolation=InterpolationMode.LANCZOS),
+        transforms.Resize(mid_reso, interpolation=InterpolationMode.LANCZOS),
+        # transforms.Resize: resize the shorter edge to mid_reso
+        transforms.RandomCrop((final_reso, final_reso)),
         BlindTransform(opt), NormTransform(),
     ]
     train_hq_aug = [
-        transforms.Resize((final_reso, final_reso), interpolation=InterpolationMode.LANCZOS),
+        transforms.Resize(mid_reso, interpolation=InterpolationMode.LANCZOS),
+        # transforms.Resize: resize the shorter edge to mid_reso
+        transforms.RandomCrop((final_reso, final_reso)),
         transforms.ToTensor(), NormTransform(),
     ]
 
@@ -315,8 +351,8 @@ if __name__ == '__main__':
 
     import torchvision
     import numpy as np
-    transform_dict = {'lq_transform': train_lq_transform, 'hq_transform': train_hq_transform}
-    ds = FFHQBlind(root=sys.argv[2], split='train', **transform_dict)
+    transform_dict = {'lq_transform': train_lq_transform, 'hq_transform': train_hq_transform, 'use_hflip': False, 'identify_ratio': 0.}
+    ds = FFHQBlind(root=args.data, split='train', **transform_dict)
     lq_res_list = []
     hq_res_list = []
     res_list = []
@@ -363,121 +399,3 @@ if __name__ == '__main__':
     chw = chw.permute(1, 2, 0).mul_(255).cpu().numpy()
     chw = PImage.fromarray(chw.astype(np.uint8))
     chw.save(os.path.join(root, f'res.png'))
-
-# if __name__ == '__main__':
-#     import glob
-#     import math
-#
-#     import PIL.Image as PImage
-#     from torchvision.transforms import InterpolationMode, transforms
-#     import torch
-#
-#     from utils import dist_utils
-#
-#     dist_utils.init_distributed_mode(local_out_path='../tmp', timeout_minutes=30)
-#
-#     def normalize_01_into_pm1(x):  # normalize x from [0, 1] to [-1, 1] by (x*2) - 1
-#         return x.add(x).add_(-1)
-#
-#     def denormalize_pm1_into_01(x):  # normalize x from [-1, 1] to [0, 1] by (x + 1)/2
-#         return x.add(1)/2
-#
-#     def img_folder_to_tensor(img_folder: str, transform: transforms.Compose, img_size: int) -> Tuple[torch.Tensor, torch.Tensor]:
-#         ori_aug = transforms.Compose(
-#             [
-#                 transforms.Resize((img_size, img_size), interpolation=InterpolationMode.LANCZOS),
-#                 transforms.ToTensor()
-#             ]
-#         )
-#         # mid_reso = 1.125
-#         # final_reso = 256
-#         # mid_reso = round(min(mid_reso, 2) * final_reso)
-#         # ori_aug = transforms.Compose(
-#         #     [
-#         #         transforms.Resize(mid_reso, interpolation=InterpolationMode.LANCZOS),
-#         #         transforms.CenterCrop((final_reso, final_reso)),
-#         #         # transforms.Resize(final_reso, interpolation=InterpolationMode.LANCZOS),
-#         #         transforms.ToTensor(), normalize_01_into_pm1
-#         #     ]
-#         # )
-#         img_list = glob.glob(f'{img_folder}/*.png')
-#         img_all = []
-#         ori_img_all = []
-#         for img_path in img_list:
-#             img_tensor = transform(PImage.open(img_path))
-#             origin_img_tensor = ori_aug(PImage.open(img_path))
-#             img_all.append(img_tensor)
-#             ori_img_all.append(origin_img_tensor)
-#         img_tensor = torch.stack(img_all, dim=0)
-#         origin_img_tensor = torch.stack(ori_img_all, dim=0)
-#         return origin_img_tensor, img_tensor
-#
-#     def tensor_to_img(img_tensor: torch.Tensor) -> PImage.Image:
-#         B, C, H, W = img_tensor.shape
-#         assert int(math.sqrt(B)) * int(math.sqrt(B)) == B
-#         b = int(math.sqrt(B))
-#         img_tensor = torch.permute(img_tensor, (1, 0, 2, 3))
-#         img_tensor = torch.reshape(img_tensor, (C, b, b * H, W))
-#         img_tensor = torch.permute(img_tensor, (0, 2, 1, 3))
-#         img_tensor = torch.reshape(img_tensor, (C, b * H, b * W))
-#         img = transforms.ToPILImage()(img_tensor)
-#         return img
-#
-#     import sys
-#     from pathlib import Path
-#     import os
-#     out_path = Path(os.path.dirname(__file__)).parent
-#     vae_ckpt = sys.argv[1]
-#     B, C, H, W = 4, 3, 256, 256
-#     vae = VQVAE(vocab_size=4096, z_channels=32, ch=160, test_mode=True,
-#                 share_quant_resi=4, v_patch_nums=(1, 2, 3, 4, 5, 6, 8, 10, 13, 16)).to('cpu')
-#     vae.eval()
-#     vae.load_state_dict(torch.load(vae_ckpt, map_location='cpu'), strict=True, compat=False)
-#
-#     # vae_ckpt = '/Users/katz/Downloads/vae_ch160v4096z32.pth'
-#     # vae.load_state_dict(torch.load(vae_ckpt, map_location='cpu'), strict=True, compat=True)
-#     # torch.save(vae.state_dict(), os.path.join(out_path, 'pt_vae_ch160v4096z32_new.pth'))
-#
-#     mid_reso = 1.125
-#     final_reso = 256
-#     mid_reso = round(min(mid_reso, 2) * final_reso)
-#     aug = transforms.Compose(
-#         [
-#             # transforms.Resize(mid_reso, interpolation=InterpolationMode.LANCZOS),
-#             # transforms.CenterCrop((final_reso, final_reso)),
-#             transforms.Resize((final_reso, final_reso), interpolation=InterpolationMode.LANCZOS),
-#             transforms.ToTensor(), normalize_01_into_pm1
-#         ]
-#     )
-#     origin_img, img = img_folder_to_tensor('../tmp', aug, img_size=final_reso)
-#     print(img.shape)
-#
-#     # hs = vae.encoder(img)
-#     # print(hs.keys())
-#     # ex = hs['out']
-#     # print('ex', ex.shape)
-#     # x = vae.quant_conv(ex)
-#     # print('x', x.shape)
-#     # idx_gt = vae.quantize.f_to_idxBl_or_fhat(x, to_fhat=False)
-#     # for idx in idx_gt:
-#     #     print('idx', idx.shape)
-#     # gt = torch.cat(idx_gt, dim=1)
-#     # print(gt.shape)
-#     # quant_feat_gt = vae.quantize.f_to_idxBl_or_fhat(x, to_fhat=True)
-#     # quant_feat = torch.cat(quant_feat_gt, dim=1)
-#     # print(quant_feat.shape)
-#     #
-#     # idx_imp = vae.quantize.idxBl_to_var_input(idx_gt)
-#     # print(idx_imp.shape)
-#
-#     in_img = tensor_to_img(origin_img)
-#     in_img.save(os.path.join(out_path, 'inp.png'))
-#
-#     res, vq_loss, usages = vae.forward(img, ret_usages=True)
-#     res = denormalize_pm1_into_01(res)
-#     print(res.shape)
-#     print(vq_loss)
-#     print(usages)
-#
-#     res_img = tensor_to_img(res)
-#     res_img.save(os.path.join(out_path, 'out.png'))

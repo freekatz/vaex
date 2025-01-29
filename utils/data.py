@@ -52,22 +52,30 @@ def build_transforms_params(args: arg_util.Args):
             # 'gray_prob': 0.01,
         }
         train_lq_aug = [
-            transforms.Resize((final_reso, final_reso), interpolation=InterpolationMode.LANCZOS),
+            transforms.Resize(mid_reso, interpolation=InterpolationMode.LANCZOS),
+            # transforms.Resize: resize the shorter edge to mid_reso
+            transforms.RandomCrop((final_reso, final_reso)),
             BlindTransform(opt),
             NormTransform(),
         ]
         train_hq_aug = [
-            transforms.Resize((final_reso, final_reso), interpolation=InterpolationMode.LANCZOS),
+            transforms.Resize(mid_reso, interpolation=InterpolationMode.LANCZOS),
+            # transforms.Resize: resize the shorter edge to mid_reso
+            transforms.RandomCrop((final_reso, final_reso)),
             transforms.ToTensor(),
             NormTransform()
         ]
         val_lq_aug = [
-            transforms.Resize((final_reso, final_reso), interpolation=InterpolationMode.LANCZOS),
+            transforms.Resize(mid_reso, interpolation=InterpolationMode.LANCZOS),
+            # transforms.Resize: resize the shorter edge to mid_reso
+            transforms.RandomCrop((final_reso, final_reso)),
             BlindTransform(opt),
             NormTransform(),
         ]
         val_hq_aug = [
-            transforms.Resize((final_reso, final_reso), interpolation=InterpolationMode.LANCZOS),
+            transforms.Resize(mid_reso, interpolation=InterpolationMode.LANCZOS),
+            # transforms.Resize: resize the shorter edge to mid_reso
+            transforms.RandomCrop((final_reso, final_reso)),
             transforms.ToTensor(),
             NormTransform()
         ]

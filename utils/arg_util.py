@@ -124,7 +124,7 @@ class Args(Tap):
     img_size: int = 256
     mid_reso: float = 1.125     # aug: first resize to mid_reso = 1.125 * data_load_reso, then crop to data_load_reso
     data_load_reso: float = 0     # aug: first resize to mid_reso = 1.125 * data_load_reso, then crop to data_load_reso
-    hflip: bool = False         # augmentation: horizontal flip
+    hflip: bool = True         # augmentation: horizontal flip
     workers: int = 8            # num workers; 0: auto, -1: don't use multiprocessing in DataLoader
     
     acc_all: float = None   # [automatically set; don't specify this]
