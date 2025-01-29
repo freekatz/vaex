@@ -4,7 +4,11 @@ References:
 - GumbelQuantize: https://github.com/CompVis/taming-transformers/blob/3ba01b241669f5ade541ce990f7650a3b8f65318/taming/modules/vqvae/quantize.py#L213
 - VQVAE (VQModel): https://github.com/CompVis/stable-diffusion/blob/21f890f9da3cfbeaba8e2ac3c425ee9e998d5229/ldm/models/autoencoder.py#L14
 """
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+import sys, os
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../'))
 
 import torch
 import torch.nn as nn
@@ -28,6 +32,7 @@ class VQVAE(nn.Module):
             default_qresi_counts=0, # if is 0: automatically set to len(v_patch_nums)，残差块的数量
             v_patch_nums=(1, 2, 3, 4, 5, 6, 8, 10, 13, 16), # number of patches for each scale, h_{1 to K} = w_{1 to K} = v_patch_nums[k]，代表每个尺度下的词元图像 h 和 w
             test_mode=True,
+            fix_modules=['quantize'],
     ):
         super().__init__()
         self.test_mode = test_mode
@@ -52,15 +57,20 @@ class VQVAE(nn.Module):
         self.quant_conv = torch.nn.Conv2d(self.Cvae, self.Cvae, quant_conv_ks, stride=1, padding=quant_conv_ks//2)
         self.post_quant_conv = torch.nn.Conv2d(self.Cvae, self.Cvae, quant_conv_ks, stride=1, padding=quant_conv_ks//2)
 
+        for module in fix_modules:
+            for p in getattr(self, module).parameters():
+                p.requires_grad_(False)
         if self.test_mode:
             self.eval()
             [p.requires_grad_(False) for p in self.parameters()]
 
     # ===================== `forward` is only used in VAE training =====================
-    def forward(self, lq, hq, ret_usages=False):   # -> rec_B3HW, idx_N, loss
+    def forward(self, lq, ret_usages=False):   # -> rec_B3HW, idx_N, loss
         VectorQuantizer2.forward
-        f_hat, vq_loss, usages = self.quantize(self.quant_conv(self.encoder(hq)), ret_usages=ret_usages)
-        return self.decoder(self.post_quant_conv(f_hat)), vq_loss, usages
+        hs = self.encoder(lq)
+        h = hs['out']
+        f_hat, vq_loss, usages = self.quantize(self.quant_conv(h), ret_usages=ret_usages)
+        return self.decoder(self.post_quant_conv(f_hat), hs), vq_loss, usages
     # ===================== `forward` is only used in VAE training =====================
 
     def fhat_to_img(self, f_hat: torch.Tensor):
@@ -93,10 +103,106 @@ class VQVAE(nn.Module):
         else:
             return [self.decoder(self.post_quant_conv(f_hat)).clamp_(-1, 1) for f_hat in ls_f_hat_BChw]
 
-    def load_state_dict(self, state_dict: Dict[str, Any], strict=True, assign=False):
+    def load_state_dict(self, state_dict: Dict[str, Any], strict=True, assign=False, compat=False):
         if 'quantize.ema_vocab_hit_SV' in state_dict and state_dict['quantize.ema_vocab_hit_SV'].shape[0] != self.quantize.ema_vocab_hit_SV.shape[0]:
             state_dict['quantize.ema_vocab_hit_SV'] = self.quantize.ema_vocab_hit_SV
-        return super().load_state_dict(state_dict=state_dict, strict=strict, assign=assign)
+
+        if compat:
+            # compat encoder and decoder
+            new_state_dict = OrderedDict()
+            for key in list(state_dict.keys()):
+                if key.startswith('decoder.'):
+                    comped = False
+                    if key.find('attn_1.qkv') != -1:
+                        param = state_dict.pop(key)
+                        dim = param.shape[0] // 3
+                        param_list = torch.split(param, dim, dim=0)
+                        q_key = key.replace('qkv', 'q')
+                        k_key = key.replace('qkv', 'k')
+                        v_key = key.replace('qkv', 'v')
+                        new_state_dict[q_key] = param_list[0].contiguous()
+                        new_state_dict[k_key] = param_list[1].contiguous()
+                        new_state_dict[v_key] = param_list[2].contiguous()
+                        comped = True
+                    for i in range(5):
+                        if key.find(f'attn.{i}.qkv') != -1:
+                            param = state_dict.pop(key)
+                            dim = param.shape[0] // 3
+                            param_list = torch.split(param, dim, dim=0)
+                            q_key = key.replace('qkv', 'q')
+                            k_key = key.replace('qkv', 'k')
+                            v_key = key.replace('qkv', 'v')
+                            new_state_dict[q_key] = param_list[0].contiguous()
+                            new_state_dict[k_key] = param_list[1].contiguous()
+                            new_state_dict[v_key] = param_list[2].contiguous()
+                            comped = True
+                    if key.find('attn_1.norm') != -1:
+                        param = state_dict.pop(key)
+                        norm1_key = key.replace('norm', 'norm1')
+                        norm2_key = key.replace('norm', 'norm2')
+                        new_state_dict[norm1_key] = param
+                        new_state_dict[norm2_key] = param.clone()
+                        comped = True
+                    for i in range(5):
+                        if key.find(f'attn.{i}.norm') != -1:
+                            param = state_dict.pop(key)
+                            norm1_key = key.replace('norm', 'norm1')
+                            norm2_key = key.replace('norm', 'norm2')
+                            new_state_dict[norm1_key] = param
+                            new_state_dict[norm2_key] = param.clone()
+                            comped = True
+                    if not comped:
+                        new_state_dict[key] = state_dict.pop(key)
+                elif key.startswith('encoder.'):
+                    comped = False
+                    if key.find('attn_1.qkv') != -1:
+                        param = state_dict.pop(key)
+                        dim = param.shape[0] // 3
+                        param_list = torch.split(param, dim, dim=0)
+                        q_key = key.replace('qkv', 'q')
+                        k_key = key.replace('qkv', 'k')
+                        v_key = key.replace('qkv', 'v')
+                        new_state_dict[q_key] = param_list[0].contiguous()
+                        new_state_dict[k_key] = param_list[1].contiguous()
+                        new_state_dict[v_key] = param_list[2].contiguous()
+                        comped = True
+                    for i in range(5):
+                        if key.find(f'attn.{i}.qkv') != -1:
+                            param = state_dict.pop(key)
+                            dim = param.shape[0] // 3
+                            param_list = torch.split(param, dim, dim=0)
+                            q_key = key.replace('qkv', 'q')
+                            k_key = key.replace('qkv', 'k')
+                            v_key = key.replace('qkv', 'v')
+                            new_state_dict[q_key] = param_list[0].contiguous()
+                            new_state_dict[k_key] = param_list[1].contiguous()
+                            new_state_dict[v_key] = param_list[2].contiguous()
+                            comped = True
+                    if key.find('attn_1.norm') != -1:
+                        param = state_dict.pop(key)
+                        norm1_key = key.replace('norm', 'norm1')
+                        norm2_key = key.replace('norm', 'norm2')
+                        new_state_dict[norm1_key] = param
+                        new_state_dict[norm2_key] = param.clone()
+                        comped = True
+                    for i in range(5):
+                        if key.find(f'attn.{i}.norm') != -1:
+                            param = state_dict.pop(key)
+                            norm1_key = key.replace('norm', 'norm1')
+                            norm2_key = key.replace('norm', 'norm2')
+                            new_state_dict[norm1_key] = param
+                            new_state_dict[norm2_key] = param.clone()
+                            comped = True
+                    if not comped:
+                        new_state_dict[key] = state_dict.pop(key)
+                else:
+                    new_state_dict[key] = state_dict.pop(key)
+        else:
+            new_state_dict = state_dict
+
+        # 	Missing key(s) in state_dict: "decoder.mid.attn_1.norm1.weight", "decoder.mid.attn_1.norm1.bias", "decoder.mid.attn_1.norm2.weight", "decoder.mid.attn_1.norm2.bias", "decoder.mid.attn_1.q.weight", "decoder.mid.attn_1.q.bias", "decoder.mid.attn_1.k.weight", "decoder.mid.attn_1.k.bias", "decoder.mid.attn_1.v.weight", "decoder.mid.attn_1.v.bias", "decoder.up.4.attn.0.norm1.weight", "decoder.up.4.attn.0.norm1.bias", "decoder.up.4.attn.0.norm2.weight", "decoder.up.4.attn.0.norm2.bias", "decoder.up.4.attn.0.q.weight", "decoder.up.4.attn.0.q.bias", "decoder.up.4.attn.0.k.weight", "decoder.up.4.attn.0.k.bias", "decoder.up.4.attn.0.v.weight", "decoder.up.4.attn.0.v.bias", "decoder.up.4.attn.1.norm1.weight", "decoder.up.4.attn.1.norm1.bias", "decoder.up.4.attn.1.norm2.weight", "decoder.up.4.attn.1.norm2.bias", "decoder.up.4.attn.1.q.weight", "decoder.up.4.attn.1.q.bias", "decoder.up.4.attn.1.k.weight", "decoder.up.4.attn.1.k.bias", "decoder.up.4.attn.1.v.weight", "decoder.up.4.attn.1.v.bias", "decoder.up.4.attn.2.norm1.weight", "decoder.up.4.attn.2.norm1.bias", "decoder.up.4.attn.2.norm2.weight", "decoder.up.4.attn.2.norm2.bias", "decoder.up.4.attn.2.q.weight", "decoder.up.4.attn.2.q.bias", "decoder.up.4.attn.2.k.weight", "decoder.up.4.attn.2.k.bias", "decoder.up.4.attn.2.v.weight", "decoder.up.4.attn.2.v.bias".
+        # 	Unexpected key(s) in state_dict: "decoder.mid.attn_1.norm.weight", "decoder.mid.attn_1.norm.bias", "decoder.mid.attn_1.qkv.weight", "decoder.mid.attn_1.qkv.bias", "decoder.up.4.attn.0.norm.weight", "decoder.up.4.attn.0.norm.bias", "decoder.up.4.attn.0.qkv.weight", "decoder.up.4.attn.0.qkv.bias", "decoder.up.4.attn.1.norm.weight", "decoder.up.4.attn.1.norm.bias", "decoder.up.4.attn.1.qkv.weight", "decoder.up.4.attn.1.qkv.bias", "decoder.up.4.attn.2.norm.weight", "decoder.up.4.attn.2.norm.bias", "decoder.up.4.attn.2.qkv.weight", "decoder.up.4.attn.2.qkv.bias".
+        return super().load_state_dict(state_dict=new_state_dict, strict=strict, assign=assign)
 
 
 if __name__ == '__main__':
@@ -158,51 +264,220 @@ if __name__ == '__main__':
         img = transforms.ToPILImage()(img_tensor)
         return img
 
-    vae_ckpt = r'/Users/katz/Downloads/vae_ch160v4096z32.pth'
+    import sys
+    from pathlib import Path
+    import os
+    root = Path(os.path.dirname(__file__)).parent
+    vae_ckpt = sys.argv[1]
     B, C, H, W = 4, 3, 256, 256
     vae = VQVAE(vocab_size=4096, z_channels=32, ch=160, test_mode=True,
                 share_quant_resi=4, v_patch_nums=(1, 2, 3, 4, 5, 6, 8, 10, 13, 16)).to('cpu')
     vae.eval()
-    vae.load_state_dict(torch.load(vae_ckpt, map_location='cpu'), strict=True)
 
-    mid_reso = 1.125
+    # trainer
+    state_dict = torch.load(vae_ckpt, map_location='cpu')
+    if 'trainer' in state_dict.keys():
+        state_dict = state_dict['trainer']['vae_ema']
+    vae.load_state_dict(state_dict, strict=True, compat=False)
+
+    # vae_ckpt = '/Users/katz/Downloads/vae_ch160v4096z32.pth'
+    # vae.load_state_dict(torch.load(vae_ckpt, map_location='cpu'), strict=True, compat=True)
+    # torch.save(vae.state_dict(), os.path.join(out_path, 'pt_vae_ch160v4096z32_new.pth'))
+
+    from utils.my_transforms import BlindTransform, NormTransform
+    from utils.my_dataset import FFHQBlind
+
+    opt = {
+        'blur_kernel_size': 41,
+        'kernel_list': ['iso', 'aniso'],
+        'kernel_prob': [0.5, 0.5],
+        'blur_sigma': [1, 15],
+        'downsample_range': [4, 30],
+        'noise_range': [0, 1],
+        'jpeg_range': [30, 80],
+        'use_hflip': True,
+    }
     final_reso = 256
-    mid_reso = round(min(mid_reso, 2) * final_reso)
-    aug = transforms.Compose(
-        [
-            # transforms.Resize(mid_reso, interpolation=InterpolationMode.LANCZOS),
-            # transforms.CenterCrop((final_reso, final_reso)),
-            transforms.Resize((final_reso, final_reso), interpolation=InterpolationMode.LANCZOS),
-            transforms.ToTensor(), normalize_01_into_pm1
-        ]
-    )
-    origin_img, img = img_folder_to_tensor('../tmp', aug, img_size=final_reso)
-    print(img.shape)
+    mid_reso = 1.125
+    # build augmentations
+    mid_reso = round(mid_reso * final_reso)  # first resize to mid_reso, then crop to final_reso
+    train_lq_aug = [
+        transforms.Resize((final_reso, final_reso), interpolation=InterpolationMode.LANCZOS),
+        BlindTransform(opt), NormTransform(),
+    ]
+    train_hq_aug = [
+        transforms.Resize((final_reso, final_reso), interpolation=InterpolationMode.LANCZOS),
+        transforms.ToTensor(), NormTransform(),
+    ]
 
-    ex = vae.encoder(img)
-    print('ex', ex.shape)
-    x = vae.quant_conv(ex)
-    print('x', x.shape)
-    idx_gt = vae.quantize.f_to_idxBl_or_fhat(x, to_fhat=False)
-    for idx in idx_gt:
-        print('idx', idx.shape)
-    gt = torch.cat(idx_gt, dim=1)
-    print(gt.shape)
-    quant_feat_gt = vae.quantize.f_to_idxBl_or_fhat(x, to_fhat=True)
-    quant_feat = torch.cat(quant_feat_gt, dim=1)
-    print(quant_feat.shape)
+    train_lq_transform = transforms.Compose(train_lq_aug)
+    train_hq_transform = transforms.Compose(train_hq_aug)
 
-    idx_imp = vae.quantize.idxBl_to_var_input(idx_gt)
-    print(idx_imp.shape)
+    import torchvision
+    import numpy as np
+    transform_dict = {'lq_transform': train_lq_transform, 'hq_transform': train_hq_transform}
+    ds = FFHQBlind(root=sys.argv[2], split='train', **transform_dict)
+    lq_res_list = []
+    hq_res_list = []
+    res_list = []
+    for idx in range(len(ds)):
+        if idx > 20:
+            break
+        lq, hq = ds[idx]
+        lq = lq.unsqueeze(0)
+        hq = hq.unsqueeze(0)
+        print(lq.shape, hq.shape)
+        res_list.extend([hq, lq])
 
-    # in_img = tensor_to_img(origin_img)
-    # in_img.save('../inp.png')
-    #
-    # res, vq_loss, usages = vae.forward(img, ret_usages=True)
-    # res = denormalize_pm1_into_01(res)
-    # print(res.shape)
-    # print(vq_loss)
-    # print(usages)
-    #
-    # res_img = tensor_to_img(res)
-    # res_img.save('../out.png')
+        lq_res, vq_loss, usages = vae.forward(lq, ret_usages=True)
+        print(idx, lq_res.shape)
+        print(idx, vq_loss)
+        print(idx, usages)
+        lq_res_list.extend([hq, lq, lq_res])
+
+        hq_res, vq_loss, usages = vae.forward(hq, ret_usages=True)
+        print(idx, hq_res.shape)
+        print(idx, vq_loss)
+        print(idx, usages)
+        hq_res_list.extend([hq, hq, hq_res])
+
+        res_list.extend([hq_res, lq_res])
+
+    lq_res_img = torch.cat(lq_res_list, dim=0)
+    img = denormalize_pm1_into_01(lq_res_img)
+    chw = torchvision.utils.make_grid(img, nrow=3, padding=0, pad_value=1.0)
+    chw = chw.permute(1, 2, 0).mul_(255).cpu().numpy()
+    chw = PImage.fromarray(chw.astype(np.uint8))
+    chw.save(os.path.join(root, f'lq-res.png'))
+
+    hq_res_img = torch.cat(hq_res_list, dim=0)
+    img = denormalize_pm1_into_01(hq_res_img)
+    chw = torchvision.utils.make_grid(img, nrow=3, padding=0, pad_value=1.0)
+    chw = chw.permute(1, 2, 0).mul_(255).cpu().numpy()
+    chw = PImage.fromarray(chw.astype(np.uint8))
+    chw.save(os.path.join(root, f'hq-res.png'))
+
+    res_img = torch.cat(res_list, dim=0)
+    img = denormalize_pm1_into_01(res_img)
+    chw = torchvision.utils.make_grid(img, nrow=4, padding=0, pad_value=1.0)
+    chw = chw.permute(1, 2, 0).mul_(255).cpu().numpy()
+    chw = PImage.fromarray(chw.astype(np.uint8))
+    chw.save(os.path.join(root, f'res.png'))
+
+# if __name__ == '__main__':
+#     import glob
+#     import math
+#
+#     import PIL.Image as PImage
+#     from torchvision.transforms import InterpolationMode, transforms
+#     import torch
+#
+#     from utils import dist_utils
+#
+#     dist_utils.init_distributed_mode(local_out_path='../tmp', timeout_minutes=30)
+#
+#     def normalize_01_into_pm1(x):  # normalize x from [0, 1] to [-1, 1] by (x*2) - 1
+#         return x.add(x).add_(-1)
+#
+#     def denormalize_pm1_into_01(x):  # normalize x from [-1, 1] to [0, 1] by (x + 1)/2
+#         return x.add(1)/2
+#
+#     def img_folder_to_tensor(img_folder: str, transform: transforms.Compose, img_size: int) -> Tuple[torch.Tensor, torch.Tensor]:
+#         ori_aug = transforms.Compose(
+#             [
+#                 transforms.Resize((img_size, img_size), interpolation=InterpolationMode.LANCZOS),
+#                 transforms.ToTensor()
+#             ]
+#         )
+#         # mid_reso = 1.125
+#         # final_reso = 256
+#         # mid_reso = round(min(mid_reso, 2) * final_reso)
+#         # ori_aug = transforms.Compose(
+#         #     [
+#         #         transforms.Resize(mid_reso, interpolation=InterpolationMode.LANCZOS),
+#         #         transforms.CenterCrop((final_reso, final_reso)),
+#         #         # transforms.Resize(final_reso, interpolation=InterpolationMode.LANCZOS),
+#         #         transforms.ToTensor(), normalize_01_into_pm1
+#         #     ]
+#         # )
+#         img_list = glob.glob(f'{img_folder}/*.png')
+#         img_all = []
+#         ori_img_all = []
+#         for img_path in img_list:
+#             img_tensor = transform(PImage.open(img_path))
+#             origin_img_tensor = ori_aug(PImage.open(img_path))
+#             img_all.append(img_tensor)
+#             ori_img_all.append(origin_img_tensor)
+#         img_tensor = torch.stack(img_all, dim=0)
+#         origin_img_tensor = torch.stack(ori_img_all, dim=0)
+#         return origin_img_tensor, img_tensor
+#
+#     def tensor_to_img(img_tensor: torch.Tensor) -> PImage.Image:
+#         B, C, H, W = img_tensor.shape
+#         assert int(math.sqrt(B)) * int(math.sqrt(B)) == B
+#         b = int(math.sqrt(B))
+#         img_tensor = torch.permute(img_tensor, (1, 0, 2, 3))
+#         img_tensor = torch.reshape(img_tensor, (C, b, b * H, W))
+#         img_tensor = torch.permute(img_tensor, (0, 2, 1, 3))
+#         img_tensor = torch.reshape(img_tensor, (C, b * H, b * W))
+#         img = transforms.ToPILImage()(img_tensor)
+#         return img
+#
+#     import sys
+#     from pathlib import Path
+#     import os
+#     out_path = Path(os.path.dirname(__file__)).parent
+#     vae_ckpt = sys.argv[1]
+#     B, C, H, W = 4, 3, 256, 256
+#     vae = VQVAE(vocab_size=4096, z_channels=32, ch=160, test_mode=True,
+#                 share_quant_resi=4, v_patch_nums=(1, 2, 3, 4, 5, 6, 8, 10, 13, 16)).to('cpu')
+#     vae.eval()
+#     vae.load_state_dict(torch.load(vae_ckpt, map_location='cpu'), strict=True, compat=False)
+#
+#     # vae_ckpt = '/Users/katz/Downloads/vae_ch160v4096z32.pth'
+#     # vae.load_state_dict(torch.load(vae_ckpt, map_location='cpu'), strict=True, compat=True)
+#     # torch.save(vae.state_dict(), os.path.join(out_path, 'pt_vae_ch160v4096z32_new.pth'))
+#
+#     mid_reso = 1.125
+#     final_reso = 256
+#     mid_reso = round(min(mid_reso, 2) * final_reso)
+#     aug = transforms.Compose(
+#         [
+#             # transforms.Resize(mid_reso, interpolation=InterpolationMode.LANCZOS),
+#             # transforms.CenterCrop((final_reso, final_reso)),
+#             transforms.Resize((final_reso, final_reso), interpolation=InterpolationMode.LANCZOS),
+#             transforms.ToTensor(), normalize_01_into_pm1
+#         ]
+#     )
+#     origin_img, img = img_folder_to_tensor('../tmp', aug, img_size=final_reso)
+#     print(img.shape)
+#
+#     # hs = vae.encoder(img)
+#     # print(hs.keys())
+#     # ex = hs['out']
+#     # print('ex', ex.shape)
+#     # x = vae.quant_conv(ex)
+#     # print('x', x.shape)
+#     # idx_gt = vae.quantize.f_to_idxBl_or_fhat(x, to_fhat=False)
+#     # for idx in idx_gt:
+#     #     print('idx', idx.shape)
+#     # gt = torch.cat(idx_gt, dim=1)
+#     # print(gt.shape)
+#     # quant_feat_gt = vae.quantize.f_to_idxBl_or_fhat(x, to_fhat=True)
+#     # quant_feat = torch.cat(quant_feat_gt, dim=1)
+#     # print(quant_feat.shape)
+#     #
+#     # idx_imp = vae.quantize.idxBl_to_var_input(idx_gt)
+#     # print(idx_imp.shape)
+#
+#     in_img = tensor_to_img(origin_img)
+#     in_img.save(os.path.join(out_path, 'inp.png'))
+#
+#     res, vq_loss, usages = vae.forward(img, ret_usages=True)
+#     res = denormalize_pm1_into_01(res)
+#     print(res.shape)
+#     print(vq_loss)
+#     print(usages)
+#
+#     res_img = tensor_to_img(res)
+#     res_img.save(os.path.join(out_path, 'out.png'))

@@ -53,8 +53,8 @@ def build_model(args: arg_util.Args):
         print(f'[PT] Disc model (frozen part) = {disc_wo_ddp.dino_proxy[0]}\n')
     print(f'[PT] Disc model (trainable part) = {disc_wo_ddp}\n\n')
 
-    assert all(p.requires_grad for p in vae_wo_ddp.parameters())
-    assert all(p.requires_grad for p in disc_wo_ddp.parameters())
+    # assert all(p.requires_grad for p in vae_wo_ddp.parameters())
+    # assert all(p.requires_grad for p in disc_wo_ddp.parameters())
     count_p = lambda m: f'{sum(p.numel() for p in m.parameters()) / 1e6:.2f}'
     print(f'[PT][#para] ' + ', '.join([f'{k}={count_p(m)}' for k, m in (
         ('VAE', vae_wo_ddp), ('VAE.enc', vae_wo_ddp.encoder), ('VAE.dec', vae_wo_ddp.decoder),
@@ -99,7 +99,15 @@ def build_optimizer(args: arg_util.Args, vae_wo_ddp, disc_wo_ddp):
         beta1, beta2 = map(float, opt_beta.split('_'))
         opt_clz = {
             'adam': partial(torch.optim.AdamW, betas=(beta1, beta2), fused=args.fuse_opt),
-            'adamw': partial(torch.optim.AdamW, betas=(beta1, beta2), fused=args.fuse_opt),
+            'adamw': partial(torch.optim.AdamW, betas=(beta1, beta2), fused=False),
+            # TODO fix
+            # torch._fused_adamw_(
+            # RuntimeError: params, grads, exp_avgs, and exp_avg_sqs must have same dtype, device, and layout
+            # torch/autograd/__init__.py:251: UserWarning: Grad strides do not match bucket view strides.
+            # This may indicate grad was not created according to the gradient layout contract,
+            # or that the param's strides changed since DDP was constructed.
+            # This is not an error, but may impair performance.
+            # grad.sizes() = [640, 640, 1, 1], strides() = [640, 1, 640, 640]
             'lamb': partial(optimizer.LAMBtimm, betas=(beta1, beta2), max_grad_norm=clip),  # eps=1e-7
             'lion': partial(optimizer.Lion, betas=(beta1, beta2), max_grad_norm=clip),  # eps=1e-7
         }[args.opt]
@@ -204,8 +212,8 @@ def build_things_from_args(args: arg_util.Args):
     
     # distributed wrapper
     ddp_class = DDP if dist_utils.initialized() else NullDDP
-    vae: DDP = ddp_class(vae_wo_ddp, device_ids=[dist_utils.get_local_rank()], find_unused_parameters=False, static_graph=args.ddp_static, broadcast_buffers=False)
-    disc: DDP = ddp_class(disc_wo_ddp, device_ids=[dist_utils.get_local_rank()], find_unused_parameters=False, static_graph=args.ddp_static, broadcast_buffers=False)
+    vae: DDP = ddp_class(vae_wo_ddp, device_ids=[dist_utils.get_local_rank()], find_unused_parameters=True, static_graph=args.ddp_static, broadcast_buffers=False)
+    disc: DDP = ddp_class(disc_wo_ddp, device_ids=[dist_utils.get_local_rank()], find_unused_parameters=True, static_graph=args.ddp_static, broadcast_buffers=False)
     
     vae_optim.model_maybe_fsdp = vae if args.zero else vae_wo_ddp
     disc_optim.model_maybe_fsdp = disc if args.zero else disc_wo_ddp
@@ -218,7 +226,7 @@ def build_things_from_args(args: arg_util.Args):
         disc_grad_ckpt=args.disc_grad_ckpt,
     )
     if trainer_state is not None and len(trainer_state):
-        trainer.load_state_dict(trainer_state, strict=False)
+        trainer.load_state_dict(trainer_state, strict=True)
     del vae, vae_wo_ddp, disc, disc_wo_ddp, vae_optim, disc_optim
 
     return (
@@ -451,10 +459,8 @@ def main_training():
         best_updated_d = False
         if Ld < min_Ld:
             if Ld < 1e-7:
-                Ld = min_Ld
-            else:
                 min_Ld = Ld
-            best_updated_d = True
+                best_updated_d = True
         acc_real, acc_fake = stats.get('acc_real', -1), stats.get('acc_fake', -1)
         acc_all = (acc_real + acc_fake) * 0.5
         args.last_Lnll, args.last_L1, args.last_Ld, args.last_wei_g, args.acc_all, args.acc_real, args.acc_fake = Lnll, L1, Ld, wei_g, acc_all, acc_real, acc_fake

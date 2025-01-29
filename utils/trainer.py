@@ -87,7 +87,7 @@ class VAETrainer(object):
         with maybe_record_function('VAE_rec'):
             with self.vae_opt.amp_ctx:
                 self.vae_wo_ddp.forward
-                rec_B3HW, Lq, usage = self.vae(lq, hq, ret_usages=loggable)
+                rec_B3HW, Lq, usage = self.vae(lq, ret_usages=loggable)
                 B = rec_B3HW.shape[0]
                 inp_rec_no_grad = torch.cat((hq, rec_B3HW.data), dim=0)
             
@@ -311,7 +311,11 @@ class VAETrainer(object):
             if m is not None:
                 if hasattr(m, '_orig_mod'):
                     m = m._orig_mod
-                ret = m.load_state_dict(state[k], strict=strict)
+
+                if k == 'vae_wo_ddp' or k == 'vae_ema':
+                    ret = m.load_state_dict(state[k], strict=strict)
+                else:
+                    ret = m.load_state_dict(state[k], strict=strict)
                 if ret is not None:
                     missing, unexpected = ret
                     print(f'[VAETr.load_state_dict] {k} missing:  {missing}')

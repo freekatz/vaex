@@ -93,14 +93,96 @@ class AttnBlock(nn.Module):
         return x + self.proj_out(h)
 
 
+class MultiHeadAttnBlock(nn.Module):
+    def __init__(self, in_channels, head_size=1):
+        super().__init__()
+        self.in_channels = in_channels
+        self.head_size = head_size
+        self.att_size = in_channels // head_size
+        assert(in_channels % head_size == 0), 'The size of head should be divided by the number of channels.'
+
+        self.norm1 = Normalize(in_channels)
+        self.norm2 = Normalize(in_channels)
+
+        self.q = torch.nn.Conv2d(in_channels,
+                                 in_channels,
+                                 kernel_size=1,
+                                 stride=1,
+                                 padding=0)
+        self.k = torch.nn.Conv2d(in_channels,
+                                 in_channels,
+                                 kernel_size=1,
+                                 stride=1,
+                                 padding=0)
+        self.v = torch.nn.Conv2d(in_channels,
+                                 in_channels,
+                                 kernel_size=1,
+                                 stride=1,
+                                 padding=0)
+        self.w_ratio = int(in_channels) ** (-0.5)
+        self.proj_out = torch.nn.Conv2d(in_channels,
+                                        in_channels,
+                                        kernel_size=1,
+                                        stride=1,
+                                        padding=0)
+        self.num = 0
+
+    def forward(self, kv, q=None):
+        h_ = kv
+        h_ = self.norm1(h_)
+        if q is None:
+            y = h_
+        else:
+            y = self.norm2(q)
+
+        q = self.q(y)
+        k = self.k(h_)
+        v = self.v(h_)
+
+        # compute attention
+        b,c,h,w = q.shape
+        q = q.reshape(b, self.head_size, self.att_size ,h*w)
+        q = q.permute(0, 3, 1, 2) # b, hw, head, att
+
+        k = k.reshape(b, self.head_size, self.att_size ,h*w)
+        k = k.permute(0, 3, 1, 2)
+
+        v = v.reshape(b, self.head_size, self.att_size ,h*w)
+        v = v.permute(0, 3, 1, 2)
+
+
+        q = q.transpose(1, 2)
+        v = v.transpose(1, 2)
+        k = k.transpose(1, 2).transpose(2,3)
+
+        scale = int(self.att_size)**(-0.5)
+        q.mul_(scale)
+        w_ = torch.matmul(q, k).mul_(self.w_ratio)
+        w_ = F.softmax(w_, dim=3)
+
+        w_ = w_.matmul(v)
+
+        w_ = w_.transpose(1, 2).contiguous() # [b, h*w, head, att]
+        w_ = w_.view(b, h, w, -1)
+        w_ = w_.permute(0, 3, 1, 2)
+
+        w_ = self.proj_out(w_)
+
+        return kv+w_
+
+
 def make_attn(in_channels, using_sa=True):
     return AttnBlock(in_channels) if using_sa else nn.Identity()
+
+
+def make_multi_cross_attn(in_channels, head_size=1, using_sa=True):
+    return MultiHeadAttnBlock(in_channels, head_size) if using_sa else nn.Identity()
 
 
 class Encoder(nn.Module):
     def __init__(
             self, *, ch=128, ch_mult=(1, 2, 4, 8), num_res_blocks=2,
-            dropout=0.0, in_channels=3,
+            dropout=0.0, in_channels=3, head_size=1,
             z_channels, double_z=False, using_sa=True, using_mid_sa=True,
     ):
         super().__init__()
@@ -124,7 +206,7 @@ class Encoder(nn.Module):
                 block.append(ResnetBlock(in_channels=block_in, out_channels=block_out, dropout=dropout))
                 block_in = block_out
                 if i_level == self.num_resolutions - 1 and using_sa:
-                    attn.append(make_attn(block_in, using_sa=True))
+                    attn.append(make_multi_cross_attn(block_in, head_size, using_sa=True))
             down = nn.Module()
             down.block = block
             down.attn = attn
@@ -134,8 +216,9 @@ class Encoder(nn.Module):
 
         # middle
         self.mid = nn.Module()
+        block_in = ch * in_ch_mult[self.num_resolutions]
         self.mid.block_1 = ResnetBlock(in_channels=block_in, out_channels=block_in, dropout=dropout)
-        self.mid.attn_1 = make_attn(block_in, using_sa=using_mid_sa)
+        self.mid.attn_1 = make_multi_cross_attn(block_in, head_size, using_sa=using_mid_sa)
         self.mid.block_2 = ResnetBlock(in_channels=block_in, out_channels=block_in, dropout=dropout)
 
         # end
@@ -146,26 +229,34 @@ class Encoder(nn.Module):
     def forward(self, x):
         # downsampling
         h = self.conv_in(x)
+        hs = {}
+        hs['in'] = h
         for i_level in range(self.num_resolutions):
             for i_block in range(self.num_res_blocks):
                 h = self.down[i_level].block[i_block](h)
                 if len(self.down[i_level].attn) > 0:
                     h = self.down[i_level].attn[i_block](h)
             if i_level != self.num_resolutions - 1:
+                hs['block_' + str(i_level)] = h
                 h = self.down[i_level].downsample(h)
 
         # middle
-        h = self.mid.block_2(self.mid.attn_1(self.mid.block_1(h)))
+        h = self.mid.block_1(h)
+        hs['block_' + str(self.num_resolutions-1) + '_attn'] = h
+        h = self.mid.attn_1(h)
+        h = self.mid.block_2(h)
+        hs['mid_attn'] = h
 
         # end
         h = self.conv_out(F.silu(self.norm_out(h), inplace=True))
-        return h
+        hs['out'] = h
+        return hs
 
 
 class Decoder(nn.Module):
     def __init__(
             self, *, ch=128, ch_mult=(1, 2, 4, 8), num_res_blocks=2,
-            dropout=0.0, in_channels=3,  # in_channels: raw img channels
+            dropout=0.0, in_channels=3, head_size=1, # in_channels: raw img channels
             z_channels, using_sa=True, using_mid_sa=True,
     ):
         super().__init__()
@@ -184,7 +275,7 @@ class Decoder(nn.Module):
         # middle
         self.mid = nn.Module()
         self.mid.block_1 = ResnetBlock(in_channels=block_in, out_channels=block_in, dropout=dropout)
-        self.mid.attn_1 = make_attn(block_in, using_sa=using_mid_sa)
+        self.mid.attn_1 = make_multi_cross_attn(block_in, head_size, using_sa=using_mid_sa)
         self.mid.block_2 = ResnetBlock(in_channels=block_in, out_channels=block_in, dropout=dropout)
 
         # upsampling
@@ -197,7 +288,7 @@ class Decoder(nn.Module):
                 block.append(ResnetBlock(in_channels=block_in, out_channels=block_out, dropout=dropout))
                 block_in = block_out
                 if i_level == self.num_resolutions - 1 and using_sa:
-                    attn.append(make_attn(block_in, using_sa=True))
+                    attn.append(make_multi_cross_attn(block_in, head_size, using_sa=True))
             up = nn.Module()
             up.block = block
             up.attn = attn
@@ -209,17 +300,20 @@ class Decoder(nn.Module):
         self.norm_out = Normalize(block_in)
         self.conv_out = torch.nn.Conv2d(block_in, in_channels, kernel_size=3, stride=1, padding=1)
 
-    def forward(self, z):
+    def forward(self, z, hs):
         # z to block_in
         # middle
-        h = self.mid.block_2(self.mid.attn_1(self.mid.block_1(self.conv_in(z))))
+        h = self.mid.block_2(self.mid.attn_1(self.mid.block_1(self.conv_in(z)), hs['mid_attn']))
 
         # upsampling
         for i_level in reversed(range(self.num_resolutions)):
             for i_block in range(self.num_res_blocks + 1):
                 h = self.up[i_level].block[i_block](h)
                 if len(self.up[i_level].attn) > 0:
-                    h = self.up[i_level].attn[i_block](h)
+                    if 'block_' + str(i_level) + '_attn' in hs:
+                        h = self.up[i_level].attn[i_block](h, hs['block_' + str(i_level) + '_attn'])
+                    else:
+                        h = self.up[i_level].attn[i_block](h, hs['block_' + str(i_level)])
             if i_level != 0:
                 h = self.up[i_level].upsample(h)
 

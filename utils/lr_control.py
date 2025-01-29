@@ -101,6 +101,6 @@ def filter_params(model, ndim_dict, nowd_keys=()) -> Tuple[
             print(f'[get_param_groups][rank{dist_utils.get_rank()}] {type(model).__name__=} {count=}, {numel=}', flush=True, force=True)
     print('')
     
-    assert len(names_no_grad) == 0, f'[get_param_groups] names_no_grad = \n{pformat(names_no_grad, indent=2, width=240)}\n'
+    # assert len(names_no_grad) == 0, f'[get_param_groups] names_no_grad = \n{pformat(names_no_grad, indent=2, width=240)}\n'
     del ndim_dict
     return names, paras, list(para_groups.values())
