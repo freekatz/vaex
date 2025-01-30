@@ -182,6 +182,7 @@ def build_things_from_args(args: arg_util.Args):
     train_opt = {
         'out_size': 256,
         'mid_size': 288,  # train
+        'random_crop_ratio': 0.8,  # train
         'identify_ratio': 0.,
         'blur_kernel_size': [19, 20],
         'kernel_list': ['iso', 'aniso'],
@@ -484,11 +485,11 @@ def main_training():
         Lnll, L1, Ld, wei_g = stats['NLL'], stats['L1'], stats['Ld'], stats['Wg']
         # min_Lnll, min_Ld = min(min_Lnll, Lnll), min(min_Ld, min_Ld if Ld < 1e-7 else Ld)
         best_updated_nll = False
-        if Lnll < min_Lnll:
+        if Lnll < min_Lnll and Lnll != 0:
             best_updated_nll = True
             min_Lnll = Lnll
         best_updated_d = False
-        if Ld < min_Ld:
+        if Ld < min_Ld and Ld != 0:
             min_Ld = Ld
             best_updated_d = True
         acc_real, acc_fake = stats.get('acc_real', -1), stats.get('acc_fake', -1)

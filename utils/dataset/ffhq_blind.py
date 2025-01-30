@@ -32,6 +32,7 @@ class FFHQBlind(data.Dataset):
 
         self.mid_size = opt['mid_size']
         self.out_size = opt['out_size']
+        self.random_crop_ratio = opt['random_crop_ratio']
         self.identify_ratio = opt['identify_ratio']
         self.random_crop = transforms.RandomCrop((self.out_size, self.out_size))
 
@@ -178,7 +179,7 @@ class FFHQBlind(data.Dataset):
         img_gt = self.loader(path)
 
         # resize and random crop
-        if self.mid_size > self.out_size:
+        if self.mid_size > self.out_size and random.random() < self.random_crop_ratio:
             img_gt = vision_fn.resize(img_gt, self.mid_size, interpolation=InterpolationMode.LANCZOS)
             img_gt = self.random_crop(img_gt)
         else:
@@ -192,7 +193,7 @@ class FFHQBlind(data.Dataset):
             locations = self.get_component_coordinates(index, status)
             loc_left_eye, loc_right_eye, loc_mouth = locations
         # generate lq
-        if random.random() > (1 - self.identify_ratio):
+        if self.identify_ratio > 0 and random.random() > (1 - self.identify_ratio):
             img_lq, img_gt = img2tensor([img_gt, img_gt], bgr2rgb=True, float32=True)
         else:
             img_gt, img_lq = self.generate_lq(img_gt)
@@ -200,8 +201,8 @@ class FFHQBlind(data.Dataset):
         img_lq = torch.clip(img_lq, 0, 255) / 255.
         img_gt = torch.clip(img_gt, 0, 255) / 255.
         # normalize
-        img_gt = normalize_01_into_pm1(img_gt)
         img_lq = normalize_01_into_pm1(img_lq)
+        img_gt = normalize_01_into_pm1(img_gt)
 
         return_dict = {
                 'lq': img_lq,
@@ -225,6 +226,7 @@ if __name__ == '__main__':
     opt = {
         'out_size': 256,
         'mid_size': -1,
+        'random_crop_ratio': 0.,
         'identify_ratio': 0.,
         'blur_kernel_size': [19, 20],
         'kernel_list': ['iso', 'aniso'],
@@ -253,7 +255,7 @@ if __name__ == '__main__':
     }
 
     ds = FFHQBlind(root=data, split='train', opt=opt)
-    res = ds[5]
+    res = ds[6]
     lq, hq = res['lq'], res['gt']
     print(lq.size())
     print(hq.size())

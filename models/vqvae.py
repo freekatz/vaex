@@ -73,8 +73,16 @@ class VQVAE(nn.Module):
         return self.decoder(self.post_quant_conv(f_hat), hs), vq_loss, usages
     # ===================== `forward` is only used in VAE training =====================
 
-    def fhat_to_img(self, f_hat: torch.Tensor):
-        return self.decoder(self.post_quant_conv(f_hat)).clamp_(-1, 1)
+    def inference(self, lq, ret_usages=False):
+        VectorQuantizer2.forward
+        hs = self.encoder(lq)
+        h = hs['out']
+        f_hat, vq_loss, usages = self.quantize(self.quant_conv(h), ret_usages=ret_usages)
+        img = self.fhat_to_img(f_hat, hs)
+        return img, vq_loss, usages
+
+    def fhat_to_img(self, f_hat: torch.Tensor, hs):
+        return self.decoder(self.post_quant_conv(f_hat), hs).clamp_(min=-1, max=1)
 
     def img_to_idxBl(self, inp_img_no_grad: torch.Tensor, v_patch_nums: Optional[Sequence[Union[int, Tuple[int, int]]]] = None) -> List[torch.LongTensor]:    # return List[Bl]
         f = self.quant_conv(self.encoder(inp_img_no_grad))
@@ -220,6 +228,8 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--data', type=str, default='')
     parser.add_argument('--ckpt', type=str, default='')
+    parser.add_argument('--out', type=str, default='res')
+    parser.add_argument('--opts', type=str, default='{}')
     args = parser.parse_args()
 
     device = 'cpu'
@@ -309,7 +319,6 @@ if __name__ == '__main__':
     if 'trainer' in state_dict.keys():
         state_dict = state_dict['trainer']['vae_ema']
     vae.load_state_dict(state_dict, strict=True, compat=False)
-
     # vae_ckpt = '/Users/katz/Downloads/vae_ch160v4096z32.pth'
     # vae.load_state_dict(torch.load(vae_ckpt, map_location='cpu'), strict=True, compat=True)
     # torch.save(vae.state_dict(), os.path.join(out_path, 'pt_vae_ch160v4096z32_new.pth'))
@@ -322,6 +331,7 @@ if __name__ == '__main__':
     opt = {
         'out_size': 256,
         'mid_size': 288,
+        'random_crop_ratio': 1.,
         'identify_ratio': 0.,
         'blur_kernel_size': [19, 20],
         'kernel_list': ['iso', 'aniso'],
@@ -348,6 +358,11 @@ if __name__ == '__main__':
         'component_path': 'FFHQ_eye_mouth_landmarks_512.pth',
         'eye_enlarge_ratio': 1.4,
     }
+    import json
+    arg_opts = json.loads(args.opts)
+    for k, v in arg_opts.items():
+        print(f'Option updates: {k} {opt[k]} -> {k} {v}')
+        opt[k] = v
     ds = FFHQBlind(root=args.data, split='train', opt=opt)
     lq_in_list = []
     hq_in_list = []
@@ -362,13 +377,13 @@ if __name__ == '__main__':
     hq = torch.stack(hq_in_list, dim=0)
     print(lq.shape, hq.shape)
 
-    lq_res, vq_loss, usages = vae.forward(lq, ret_usages=True)
+    lq_res, vq_loss, usages = vae.inference(lq, ret_usages=True)
     print(lq_res.max(), lq_res.mean(), lq_res.std())
     print(lq_res.shape)
     print(vq_loss)
     print(usages)
 
-    hq_res, vq_loss, usages = vae.forward(hq, ret_usages=True)
+    hq_res, vq_loss, usages = vae.inference(hq, ret_usages=True)
     print(hq_res.max(), hq_res.mean(), hq_res.std())
     print(hq_res.shape)
     print(vq_loss)
@@ -380,4 +395,4 @@ if __name__ == '__main__':
     chw = torchvision.utils.make_grid(img, nrow=4, padding=0, pad_value=1.0)
     chw = chw.permute(1, 2, 0).mul_(255).cpu().numpy()
     chw = PImage.fromarray(chw.astype(np.uint8))
-    chw.save(os.path.join(root, f'res.png'))
+    chw.save(os.path.join(root, f'{args.out}.png'))

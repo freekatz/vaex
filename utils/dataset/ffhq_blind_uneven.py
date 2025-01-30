@@ -32,6 +32,7 @@ class FFHQBlindUneven(data.Dataset):
 
         self.mid_size = opt['mid_size']
         self.out_size = opt['out_size']
+        self.random_crop_ratio = opt['random_crop_ratio']
         self.identify_ratio = opt['identify_ratio']
         self.random_crop = transforms.RandomCrop((self.out_size, self.out_size))
 
@@ -210,7 +211,7 @@ class FFHQBlindUneven(data.Dataset):
         img_gt = self.loader(path)
 
         # resize and random crop
-        if self.mid_size > self.out_size:
+        if self.mid_size > self.out_size and random.random() < self.random_crop_ratio:
             img_gt = vision_fn.resize(img_gt, self.mid_size, interpolation=InterpolationMode.LANCZOS)
             img_gt = self.random_crop(img_gt)
         else:
@@ -257,7 +258,7 @@ class FFHQBlindUneven(data.Dataset):
                 loc_mouth[2] -= shift_h
                 loc_mouth[3] -= shift_v
         # generate lq
-        if random.random() > (1 - self.identify_ratio):
+        if self.identify_ratio > 0 and random.random() > (1 - self.identify_ratio):
             img_lq, img_gt = img2tensor([img_gt, img_gt], bgr2rgb=True, float32=True)
         else:
             img_gt, img_lq = self.generate_lq(img_gt)
@@ -265,8 +266,8 @@ class FFHQBlindUneven(data.Dataset):
         img_lq = torch.clip(img_lq, 0, 255) / 255.
         img_gt = torch.clip(img_gt, 0, 255) / 255.
         # normalize
-        img_gt = normalize_01_into_pm1(img_gt)
         img_lq = normalize_01_into_pm1(img_lq)
+        img_gt = normalize_01_into_pm1(img_gt)
 
         return_dict = {
                 'lq': img_lq,
@@ -290,6 +291,7 @@ if __name__ == '__main__':
     opt = {
         'out_size': 256,
         'mid_size': 288,  # train
+        'random_crop_ratio': 0.8,  # train
         'identify_ratio': 0.,
         'blur_kernel_size': [19, 20],
         'kernel_list': ['iso', 'aniso'],
