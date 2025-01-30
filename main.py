@@ -21,7 +21,7 @@ from torch.utils.data import DataLoader
 
 from utils import dist_utils
 from utils import arg_util, misc
-from utils.data import build_data_loader, build_transforms_params
+from utils.data import build_data_loader
 
 
 def build_tensorboard_logger(args: arg_util.Args):
@@ -99,15 +99,7 @@ def build_optimizer(args: arg_util.Args, vae_wo_ddp, disc_wo_ddp):
         beta1, beta2 = map(float, opt_beta.split('_'))
         opt_clz = {
             'adam': partial(torch.optim.AdamW, betas=(beta1, beta2), fused=args.fuse_opt),
-            'adamw': partial(torch.optim.AdamW, betas=(beta1, beta2), fused=False),
-            # TODO fix
-            # torch._fused_adamw_(
-            # RuntimeError: params, grads, exp_avgs, and exp_avg_sqs must have same dtype, device, and layout
-            # torch/autograd/__init__.py:251: UserWarning: Grad strides do not match bucket view strides.
-            # This may indicate grad was not created according to the gradient layout contract,
-            # or that the param's strides changed since DDP was constructed.
-            # This is not an error, but may impair performance.
-            # grad.sizes() = [640, 640, 1, 1], strides() = [640, 1, 640, 640]
+            'adamw': partial(torch.optim.AdamW, betas=(beta1, beta2), fused=args.fuse_opt if len(args.pretrain) == 0 else False),
             'lamb': partial(optimizer.LAMBtimm, betas=(beta1, beta2), max_grad_norm=clip),  # eps=1e-7
             'lion': partial(optimizer.Lion, betas=(beta1, beta2), max_grad_norm=clip),  # eps=1e-7
         }[args.opt]
@@ -159,6 +151,13 @@ def maybe_pretrain(args: arg_util.Args) -> dict:
     return trainer_state
 
 
+def cal_model_params(model):
+    total = sum([param.nelement() for param in model.parameters()])
+    trainable = sum([param.nelement() for param in model.parameters() if param.requires_grad])
+
+    return total, trainable
+
+
 def build_things_from_args(args: arg_util.Args):
     # resume and pretrain
     auto_resume_info, start_ep, start_it, acc_str, eval_milestone, trainer_state, args_state = maybe_resume(args)
@@ -180,12 +179,36 @@ def build_things_from_args(args: arg_util.Args):
 
     # build data
     print(f'[build PT data] ...\n')
-    train_params, _ = build_transforms_params(args)
-    train_params['use_hflip'] = args.hflip
-    train_params['identify_ratio'] = 0  # 0.005
-    # val_params['use_hflip'] = args.hflip
-    # val_params['identify_ratio'] = 0  # 0.05
-    ld_train = build_data_loader(args, start_ep, start_it, dataset=None, dataset_params=train_params, split='train')
+    train_opt = {
+        'out_size': 256,
+        'mid_size': 288,  # train
+        'identify_ratio': 0.,
+        'blur_kernel_size': [19, 20],
+        'kernel_list': ['iso', 'aniso'],
+        'kernel_prob': [0.5, 0.5],
+        'blur_sigma': [0.1, 10],
+        'downsample_range': [0.8, 8],
+        'noise_range': [0, 20],
+        'jpeg_range': [60, 100],
+        'use_hflip': True,
+        'color_jitter_prob': None,
+        'color_jitter_shift': 20,
+        'color_jitter_pt_prob': None,
+        'gray_prob': 0.008,  # train
+        'gt_gray': True,
+        'exposure_prob': None,
+        'exposure_range': [0.7, 1.1],
+        'shift_prob': 0.2,  # train
+        'shift_unit': 1,
+        'shift_max_num': 32,
+        'uneven_prob': 0.1,  # train
+        'hazy_prob': 0.008,  # train
+        'hazy_alpha': [0.75, 0.95],
+        'crop_components': False,
+        'component_path': args.face_path,
+        'eye_enlarge_ratio': 1.4,
+    }
+    ld_train = build_data_loader(args, start_ep, start_it, dataset=None, dataset_params={'opt': train_opt}, split='train')
 
     [print(line) for line in auto_resume_info]
     print(f'[dataloader multi processing] ...', end='', flush=True)
@@ -198,7 +221,15 @@ def build_things_from_args(args: arg_util.Args):
 
     # build model
     vae_wo_ddp, disc_wo_ddp = build_model(args)
-    
+
+    model_size, trainable_model_size = cal_model_params(vae_wo_ddp)
+    print('Number of vae params: %.4f M' % (model_size / 1e6))
+    print('Number of vae trainable params: %.4f M' % (trainable_model_size / 1e6))
+
+    model_size, trainable_model_size = cal_model_params(disc_wo_ddp)
+    print('Number of dino params: %.4f M' % (model_size / 1e6))
+    print('Number of dino trainable params: %.4f M' % (trainable_model_size / 1e6))
+
     # build optimizers
     optimizers = build_optimizer(args, vae_wo_ddp, disc_wo_ddp)
     vae_optim, disc_optim = optimizers[0], optimizers[1]
@@ -291,8 +322,8 @@ def train_one_ep(ep: int, is_first_ep: bool, start_it: int, args: arg_util.Args,
     FREQ = min(50, iters_train//2-1)
     NVIDIA_IT_PLUS_1 = set(FREQ*i for i in (1, 2, 3, 4, 6, 8))
     PRINTABLE_IT_PLUS_1 = set(FREQ*i for i in (1, 2, 3, 4, 6, 8, 12, 16, 24, 32))
-    for it, lq_hq in me.log_every(start_it, iters_train, ld_or_itrt, max(10, iters_train // 1000), header):
-        lq, hq = lq_hq
+    for it, data in me.log_every(start_it, iters_train, ld_or_itrt, max(10, iters_train // 1000), header):
+        lq, hq = data['lq'], data['gt']
         if (it+1) % FREQ == 0:
             speed_ls.append((time.perf_counter()-last_t_perf)/FREQ)
             iter_speed = float(np.median(speed_ls))
@@ -458,9 +489,8 @@ def main_training():
             min_Lnll = Lnll
         best_updated_d = False
         if Ld < min_Ld:
-            if Ld < 1e-7:
-                min_Ld = Ld
-                best_updated_d = True
+            min_Ld = Ld
+            best_updated_d = True
         acc_real, acc_fake = stats.get('acc_real', -1), stats.get('acc_fake', -1)
         acc_all = (acc_real + acc_fake) * 0.5
         args.last_Lnll, args.last_L1, args.last_Ld, args.last_wei_g, args.acc_all, args.acc_real, args.acc_fake = Lnll, L1, Ld, wei_g, acc_all, acc_real, acc_fake
@@ -523,10 +553,10 @@ def main_training():
             }, local_out_ckpt)
             print(f'     [saving ckpt](*) finished!  @ {local_out_ckpt}', flush=True)
             if best_updated_nll:
-                print(f'[saving ckpt](*) finished!, new best nll  @ {local_out_ckpt_best_nll}', flush=True)
+                print(f'[saving ckpt](*) finished!, new best nll {min_Lnll}  @ {local_out_ckpt_best_nll}', flush=True)
                 shutil.copy(local_out_ckpt, local_out_ckpt_best_nll)
             if best_updated_d:
-                print(f'[saving ckpt](*) finished!, new best d  @ {local_out_ckpt_best_d}', flush=True)
+                print(f'[saving ckpt](*) finished!, new best d {min_Ld} @ {local_out_ckpt_best_d}', flush=True)
                 shutil.copy(local_out_ckpt, local_out_ckpt_best_d)
         dist_utils.barrier()
     

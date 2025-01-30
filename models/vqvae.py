@@ -32,7 +32,7 @@ class VQVAE(nn.Module):
             default_qresi_counts=0, # if is 0: automatically set to len(v_patch_nums)，残差块的数量
             v_patch_nums=(1, 2, 3, 4, 5, 6, 8, 10, 13, 16), # number of patches for each scale, h_{1 to K} = w_{1 to K} = v_patch_nums[k]，代表每个尺度下的词元图像 h 和 w
             test_mode=True,
-            fix_modules=['quantize'],
+            fix_modules=[],
     ):
         super().__init__()
         self.test_mode = test_mode
@@ -104,6 +104,7 @@ class VQVAE(nn.Module):
             return [self.decoder(self.post_quant_conv(f_hat)).clamp_(-1, 1) for f_hat in ls_f_hat_BChw]
 
     def load_state_dict(self, state_dict: Dict[str, Any], strict=True, assign=False, compat=False):
+        print(f'Loading state dict with strict={strict}, assign={assign}, compat={compat}')
         if 'quantize.ema_vocab_hit_SV' in state_dict and state_dict['quantize.ema_vocab_hit_SV'].shape[0] != self.quantize.ema_vocab_hit_SV.shape[0]:
             state_dict['quantize.ema_vocab_hit_SV'] = self.quantize.ema_vocab_hit_SV
 
@@ -217,8 +218,8 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--seed', type=int, default=0)
-    parser.add_argument('--data', type=str)
-    parser.add_argument('--ckpt', type=str)
+    parser.add_argument('--data', type=str, default='')
+    parser.add_argument('--ckpt', type=str, default='')
     args = parser.parse_args()
 
     device = 'cpu'
@@ -313,87 +314,68 @@ if __name__ == '__main__':
     # vae.load_state_dict(torch.load(vae_ckpt, map_location='cpu'), strict=True, compat=True)
     # torch.save(vae.state_dict(), os.path.join(out_path, 'pt_vae_ch160v4096z32_new.pth'))
 
-    from utils.my_transforms import BlindTransform, NormTransform
-    from utils.my_dataset import FFHQBlind
-
-    opt = {
-        'blur_kernel_size': 41,
-        'kernel_list': ['iso', 'aniso'],
-        'kernel_prob': [0.5, 0.5],
-        'blur_sigma': [1, 15],
-        'downsample_range': [4, 30],
-        'noise_range': [0, 20],
-        'jpeg_range': [30, 80],
-        # 'color_jitter_prob': 0.3,  # TODO 搞清楚这些数据增强
-        # 'color_jitter_shift': 20,
-        # 'color_jitter_pt_prob': 0.3,
-        # 'gray_prob': 0.01,
-    }
-    final_reso = 256
-    mid_reso = 1.125
-    # build augmentations
-    mid_reso = round(mid_reso * final_reso)  # first resize to mid_reso, then crop to final_reso
-    train_lq_aug = [
-        transforms.Resize(mid_reso, interpolation=InterpolationMode.LANCZOS),
-        # transforms.Resize: resize the shorter edge to mid_reso
-        transforms.RandomCrop((final_reso, final_reso)),
-        BlindTransform(opt), NormTransform(),
-    ]
-    train_hq_aug = [
-        transforms.Resize(mid_reso, interpolation=InterpolationMode.LANCZOS),
-        # transforms.Resize: resize the shorter edge to mid_reso
-        transforms.RandomCrop((final_reso, final_reso)),
-        transforms.ToTensor(), NormTransform(),
-    ]
-
-    train_lq_transform = transforms.Compose(train_lq_aug)
-    train_hq_transform = transforms.Compose(train_hq_aug)
-
+    from utils.dataset.ffhq_blind import FFHQBlind
     import torchvision
     import numpy as np
-    transform_dict = {'lq_transform': train_lq_transform, 'hq_transform': train_hq_transform, 'use_hflip': False, 'identify_ratio': 0.}
-    ds = FFHQBlind(root=args.data, split='train', **transform_dict)
-    lq_res_list = []
-    hq_res_list = []
-    res_list = []
+
+    # validate
+    opt = {
+        'out_size': 256,
+        'mid_size': 288,
+        'identify_ratio': 0.,
+        'blur_kernel_size': [19, 20],
+        'kernel_list': ['iso', 'aniso'],
+        'kernel_prob': [0.5, 0.5],
+        'blur_sigma': [0.1, 10],
+        'downsample_range': [0.8, 8],
+        'noise_range': [0, 20],
+        'jpeg_range': [60, 100],
+        'use_hflip': True,
+        'color_jitter_prob': None,
+        'color_jitter_shift': 20,
+        'color_jitter_pt_prob': None,
+        'gray_prob': None,
+        'gt_gray': True,
+        'exposure_prob': None,
+        'exposure_range': [0.7, 1.1],
+        'shift_prob': None,
+        'shift_unit': 1,
+        'shift_max_num': 32,
+        'uneven_prob': None,
+        'hazy_prob': None,
+        'hazy_alpha': [0.75, 0.95],
+        'crop_components': False,
+        'component_path': 'FFHQ_eye_mouth_landmarks_512.pth',
+        'eye_enlarge_ratio': 1.4,
+    }
+    ds = FFHQBlind(root=args.data, split='train', opt=opt)
+    lq_in_list = []
+    hq_in_list = []
     for idx in range(len(ds)):
         if idx > 20:
             break
-        lq, hq = ds[idx]
-        lq = lq.unsqueeze(0)
-        hq = hq.unsqueeze(0)
-        print(lq.shape, hq.shape)
-        res_list.extend([hq, lq])
+        res = ds[idx]
+        lq, hq = res['lq'], res['gt']
+        lq_in_list.append(lq)
+        hq_in_list.append(hq)
+    lq = torch.stack(lq_in_list, dim=0)
+    hq = torch.stack(hq_in_list, dim=0)
+    print(lq.shape, hq.shape)
 
-        lq_res, vq_loss, usages = vae.forward(lq, ret_usages=True)
-        print(idx, lq_res.shape)
-        print(idx, vq_loss)
-        print(idx, usages)
-        lq_res_list.extend([hq, lq, lq_res])
+    lq_res, vq_loss, usages = vae.forward(lq, ret_usages=True)
+    print(lq_res.max(), lq_res.mean(), lq_res.std())
+    print(lq_res.shape)
+    print(vq_loss)
+    print(usages)
 
-        hq_res, vq_loss, usages = vae.forward(hq, ret_usages=True)
-        print(idx, hq_res.shape)
-        print(idx, vq_loss)
-        print(idx, usages)
-        hq_res_list.extend([hq, hq, hq_res])
+    hq_res, vq_loss, usages = vae.forward(hq, ret_usages=True)
+    print(hq_res.max(), hq_res.mean(), hq_res.std())
+    print(hq_res.shape)
+    print(vq_loss)
+    print(usages)
 
-        res_list.extend([hq_res, lq_res])
-
-    lq_res_img = torch.cat(lq_res_list, dim=0)
-    img = denormalize_pm1_into_01(lq_res_img)
-    chw = torchvision.utils.make_grid(img, nrow=3, padding=0, pad_value=1.0)
-    chw = chw.permute(1, 2, 0).mul_(255).cpu().numpy()
-    chw = PImage.fromarray(chw.astype(np.uint8))
-    chw.save(os.path.join(root, f'lq-res.png'))
-
-    hq_res_img = torch.cat(hq_res_list, dim=0)
-    img = denormalize_pm1_into_01(hq_res_img)
-    chw = torchvision.utils.make_grid(img, nrow=3, padding=0, pad_value=1.0)
-    chw = chw.permute(1, 2, 0).mul_(255).cpu().numpy()
-    chw = PImage.fromarray(chw.astype(np.uint8))
-    chw.save(os.path.join(root, f'hq-res.png'))
-
-    res_img = torch.cat(res_list, dim=0)
+    res_img = torch.stack([hq, lq, hq_res, lq_res], dim=1)
+    res_img = torch.reshape(res_img, (-1, 3, 256, 256))
     img = denormalize_pm1_into_01(res_img)
     chw = torchvision.utils.make_grid(img, nrow=4, padding=0, pad_value=1.0)
     chw = chw.permute(1, 2, 0).mul_(255).cpu().numpy()

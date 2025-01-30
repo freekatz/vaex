@@ -31,6 +31,7 @@ class Args(Tap):
     pretrain: str = ''
     lpips_path: str        # lpips VGG model weights
     dino_path: str         # vit_small_patch16_224.pth model weights
+    face_path: str = ''
     data_path: str = 'dataset_link' # datasets, split by - or _, o: openimages, cc: cc12m, co: coco, fa: face data(ffhq+HumanArt+afhq+Internal), mj: midjourney, p: pinterest, px: (pexels+pixabay+unsplash)
     dataset_name: str = 'ffhq_blind'
 
