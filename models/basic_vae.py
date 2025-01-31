@@ -335,20 +335,19 @@ class Decoder(nn.Module):
         enc_feat = hs['mid_attn']
         dec_feat = self.mid.block_1(self.conv_in(z))
         h = self.mid.block_2(self.mid.attn_1(dec_feat, enc_feat))
-        h = self.mid_fuse_block(enc_feat, h, w=w)
+        h = self.mid_fuse_block(enc_feat, h, w)
 
         # upsampling
         for i_level in reversed(range(self.num_resolutions)):
             for i_block in range(self.num_res_blocks + 1):
                 h = self.up[i_level].block[i_block](h)
-                # h_hq = self.decoder_proxy[0].up[i_level].block[i_block](h_hq)
                 if len(self.up[i_level].attn) > 0:
                     if 'block_' + str(i_level) + '_attn' in hs:
                         enc_feat = hs['block_' + str(i_level) + '_attn']
                     else:
                         enc_feat = hs['block_' + str(i_level)]
                     h = self.up[i_level].attn[i_block](h, enc_feat)
-                    h = self.mid_fuse_block(enc_feat, h, w=w)
+                    h = self.up[i_level].fuse_block[i_block](enc_feat, h, w)
             if i_level != 0:
                 h = self.up[i_level].upsample(h)
 

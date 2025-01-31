@@ -317,13 +317,13 @@ if __name__ == '__main__':
     vae.eval()
 
     # trainer
+    vae_ckpt = '/Users/katz/Downloads/vae_ch160v4096z32.pth'
     state_dict = torch.load(vae_ckpt, map_location='cpu')
     if 'trainer' in state_dict.keys():
         state_dict = state_dict['trainer']['vae_ema']
-    vae.load_state_dict(state_dict, strict=True, compat=False)
-    # vae_ckpt = '/Users/katz/Downloads/vae_ch160v4096z32.pth'
-    # vae.load_state_dict(torch.load(vae_ckpt, map_location='cpu'), strict=False, compat=True)
-    # torch.save(vae.state_dict(), os.path.join('./', 'pt_vae_ch160v4096z32_new2.pth'))
+    # vae.load_state_dict(state_dict, strict=True, compat=False)
+    vae.load_state_dict(torch.load(vae_ckpt, map_location='cpu'), strict=False, compat=True)
+    torch.save(vae.state_dict(), '/Users/katz/Downloads/pt_vae_ch160v4096z32_new2.pth')
 
     from utils.dataset.ffhq_blind import FFHQBlind
     import torchvision
@@ -371,7 +371,9 @@ if __name__ == '__main__':
         chw = torchvision.utils.make_grid(img, nrow=4, padding=0, pad_value=1.0)
         chw = chw.permute(1, 2, 0).mul_(255).cpu().numpy()
         chw = PImage.fromarray(chw.astype(np.uint8))
-        chw.save(os.path.join(root, f'dataset{i}-{args.out}.png'))
+        filename = f'dataset{i}-{args.out}.png'
+        chw.save(os.path.join(root, filename))
+        print(f'Saved {filename}...')
 
     for i in range(4):
         ds = FFHQBlind(root=f'{args.data}{i+1}', split='train', opt=opt)
