@@ -31,6 +31,7 @@ class VQVAE(nn.Module):
             share_quant_resi=4,     # use 4 \phi layers for K scales: partially-shared \phi，共享残差块的数量
             default_qresi_counts=0, # if is 0: automatically set to len(v_patch_nums)，残差块的数量
             v_patch_nums=(1, 2, 3, 4, 5, 6, 8, 10, 13, 16), # number of patches for each scale, h_{1 to K} = w_{1 to K} = v_patch_nums[k]，代表每个尺度下的词元图像 h 和 w
+            head_size=0,
             test_mode=True,
             fix_modules=[],
     ):
@@ -41,7 +42,7 @@ class VQVAE(nn.Module):
         ddconfig = dict(
             dropout=dropout, ch=ch, z_channels=z_channels,
             in_channels=3, ch_mult=(1, 1, 2, 2, 4), num_res_blocks=2,   # from vq-f16/config.yaml above
-            using_sa=True, using_mid_sa=True,                           # from vq-f16/config.yaml above
+            using_sa=True, using_mid_sa=True, head_size=head_size                          # from vq-f16/config.yaml above
             # resamp_with_conv=True,   # always True, removed.
         )
         ddconfig.pop('double_z', None)  # only KL-VAE should use double_z=True
@@ -65,12 +66,12 @@ class VQVAE(nn.Module):
             [p.requires_grad_(False) for p in self.parameters()]
 
     # ===================== `forward` is only used in VAE training =====================
-    def forward(self, lq, w=1, ret_usages=False):   # -> rec_B3HW, idx_N, loss
+    def forward(self, lq, ret_usages=False):   # -> rec_B3HW, idx_N, loss
         VectorQuantizer2.forward
         hs = self.encoder(lq)
         h = hs['out']
         f_hat, vq_loss, usages = self.quantize(self.quant_conv(h), ret_usages=ret_usages)
-        return self.decoder(self.post_quant_conv(f_hat), hs, w=w), vq_loss, usages
+        return self.decoder(self.post_quant_conv(f_hat), hs), vq_loss, usages
     # ===================== `forward` is only used in VAE training =====================
 
     def inference(self, lq, ret_usages=False):
@@ -81,8 +82,8 @@ class VQVAE(nn.Module):
         img = self.fhat_to_img(f_hat, hs)
         return img, vq_loss, usages
 
-    def fhat_to_img(self, f_hat: torch.Tensor, hs, w=1):
-        return self.decoder(self.post_quant_conv(f_hat), hs, w=w).clamp_(min=-1, max=1)
+    def fhat_to_img(self, f_hat: torch.Tensor, hs):
+        return self.decoder(self.post_quant_conv(f_hat), hs).clamp_(min=-1, max=1)
 
     def img_to_idxBl(self, inp_img_no_grad: torch.Tensor, v_patch_nums: Optional[Sequence[Union[int, Tuple[int, int]]]] = None) -> List[torch.LongTensor]:    # return List[Bl]
         f = self.quant_conv(self.encoder(inp_img_no_grad))
@@ -97,19 +98,19 @@ class VQVAE(nn.Module):
             ms_h_BChw.append(self.quantize.embedding(idx_Bl).transpose(1, 2).view(B, self.Cvae, pn, pn))
         return self.embed_to_img(ms_h_BChw=ms_h_BChw, all_to_max_scale=same_shape, last_one=last_one)
 
-    def embed_to_img(self, ms_h_BChw: List[torch.Tensor], all_to_max_scale: bool, last_one=False, w=1) -> Union[List[torch.Tensor], torch.Tensor]:
+    def embed_to_img(self, ms_h_BChw: List[torch.Tensor], all_to_max_scale: bool, last_one=False) -> Union[List[torch.Tensor], torch.Tensor]:
         if last_one:
-            return self.decoder(self.post_quant_conv(self.quantize.embed_to_fhat(ms_h_BChw, all_to_max_scale=all_to_max_scale, last_one=True)), w=w).clamp_(-1, 1)
+            return self.decoder(self.post_quant_conv(self.quantize.embed_to_fhat(ms_h_BChw, all_to_max_scale=all_to_max_scale, last_one=True))).clamp_(-1, 1)
         else:
-            return [self.decoder(self.post_quant_conv(f_hat), w=w).clamp_(-1, 1) for f_hat in self.quantize.embed_to_fhat(ms_h_BChw, all_to_max_scale=all_to_max_scale, last_one=False)]
+            return [self.decoder(self.post_quant_conv(f_hat)).clamp_(-1, 1) for f_hat in self.quantize.embed_to_fhat(ms_h_BChw, all_to_max_scale=all_to_max_scale, last_one=False)]
 
-    def img_to_reconstructed_img(self, x, v_patch_nums: Optional[Sequence[Union[int, Tuple[int, int]]]] = None, last_one=False, w=1) -> List[torch.Tensor]:
+    def img_to_reconstructed_img(self, x, v_patch_nums: Optional[Sequence[Union[int, Tuple[int, int]]]] = None, last_one=False) -> List[torch.Tensor]:
         f = self.quant_conv(self.encoder(x))
         ls_f_hat_BChw = self.quantize.f_to_idxBl_or_fhat(f, to_fhat=True, v_patch_nums=v_patch_nums)
         if last_one:
-            return self.decoder(self.post_quant_conv(ls_f_hat_BChw[-1]), w=w).clamp_(-1, 1)
+            return self.decoder(self.post_quant_conv(ls_f_hat_BChw[-1])).clamp_(-1, 1)
         else:
-            return [self.decoder(self.post_quant_conv(f_hat), w=w).clamp_(-1, 1) for f_hat in ls_f_hat_BChw]
+            return [self.decoder(self.post_quant_conv(f_hat)).clamp_(-1, 1) for f_hat in ls_f_hat_BChw]
 
     def load_state_dict(self, state_dict: Dict[str, Any], strict=True, assign=False, compat=False):
         print(f'Loading state dict with strict={strict}, assign={assign}, compat={compat}')

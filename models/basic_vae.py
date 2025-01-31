@@ -171,30 +171,6 @@ class MultiHeadAttnBlock(nn.Module):
         return kv+w_
 
 
-class FuseBlock(nn.Module):
-    def __init__(self, in_ch, out_ch):
-        super().__init__()
-        self.encode_enc = ResnetBlock(in_channels=2 * in_ch, out_channels=out_ch, dropout=0.05)
-
-        self.scale = nn.Sequential(
-            nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1),
-            nn.LeakyReLU(0.2, True),
-            nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1))
-
-        self.shift = nn.Sequential(
-            nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1),
-            nn.LeakyReLU(0.2, True),
-            nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1))
-
-    def forward(self, enc_feat, dec_feat, w=1):
-        enc_feat = self.encode_enc(torch.cat([enc_feat, dec_feat], dim=1))
-        scale = self.scale(enc_feat)
-        shift = self.shift(enc_feat)
-        residual = w * (dec_feat * scale + shift)
-        out = dec_feat + residual
-        return out
-
-
 def make_attn(in_channels, using_sa=True):
     return AttnBlock(in_channels) if using_sa else nn.Identity()
 
@@ -206,7 +182,7 @@ def make_multi_cross_attn(in_channels, head_size=1, using_sa=True):
 class Encoder(nn.Module):
     def __init__(
             self, *, ch=128, ch_mult=(1, 2, 4, 8), num_res_blocks=2,
-            dropout=0.0, in_channels=3, head_size=1,
+            dropout=0.0, in_channels=3, head_size=0,
             z_channels, double_z=False, using_sa=True, using_mid_sa=True,
     ):
         super().__init__()
@@ -215,6 +191,7 @@ class Encoder(nn.Module):
         self.downsample_ratio = 2 ** (self.num_resolutions - 1)
         self.num_res_blocks = num_res_blocks
         self.in_channels = in_channels
+        self.attn_fn = make_attn if head_size == 0 else make_multi_cross_attn
 
         # downsampling
         self.conv_in = torch.nn.Conv2d(in_channels, self.ch, kernel_size=3, stride=1, padding=1)
@@ -230,7 +207,7 @@ class Encoder(nn.Module):
                 block.append(ResnetBlock(in_channels=block_in, out_channels=block_out, dropout=dropout))
                 block_in = block_out
                 if i_level == self.num_resolutions - 1 and using_sa:
-                    attn.append(make_multi_cross_attn(block_in, head_size, using_sa=True))
+                    attn.append(self.attn_fn(block_in, head_size, using_sa=True))
             down = nn.Module()
             down.block = block
             down.attn = attn
@@ -242,7 +219,7 @@ class Encoder(nn.Module):
         self.mid = nn.Module()
         block_in = ch * in_ch_mult[self.num_resolutions]
         self.mid.block_1 = ResnetBlock(in_channels=block_in, out_channels=block_in, dropout=dropout)
-        self.mid.attn_1 = make_multi_cross_attn(block_in, head_size, using_sa=using_mid_sa)
+        self.mid.attn_1 = self.attn_fn(block_in, head_size, using_sa=using_mid_sa)
         self.mid.block_2 = ResnetBlock(in_channels=block_in, out_channels=block_in, dropout=dropout)
 
         # end
@@ -280,7 +257,7 @@ class Encoder(nn.Module):
 class Decoder(nn.Module):
     def __init__(
             self, *, ch=128, ch_mult=(1, 2, 4, 8), num_res_blocks=2,
-            dropout=0.0, in_channels=3, head_size=1, # in_channels: raw img channels
+            dropout=0.0, in_channels=3, head_size=0, # in_channels: raw img channels
             z_channels, using_sa=True, using_mid_sa=True,
     ):
         super().__init__()
@@ -288,6 +265,7 @@ class Decoder(nn.Module):
         self.num_resolutions = len(ch_mult)
         self.num_res_blocks = num_res_blocks
         self.in_channels = in_channels
+        self.attn_fn = make_attn if head_size == 0 else make_multi_cross_attn
 
         # compute in_ch_mult, block_in and curr_res at lowest res
         in_ch_mult = (1,) + tuple(ch_mult)
@@ -299,8 +277,7 @@ class Decoder(nn.Module):
         # middle
         self.mid = nn.Module()
         self.mid.block_1 = ResnetBlock(in_channels=block_in, out_channels=block_in, dropout=dropout)
-        self.mid.attn_1 = make_multi_cross_attn(block_in, head_size, using_sa=using_mid_sa)
-        self.mid_fuse_block = FuseBlock(block_in, block_in)
+        self.mid.attn_1 = self.attn_fn(block_in, head_size, using_sa=using_mid_sa)
         self.mid.block_2 = ResnetBlock(in_channels=block_in, out_channels=block_in, dropout=dropout)
 
         # upsampling
@@ -309,18 +286,15 @@ class Decoder(nn.Module):
         for i_level in reversed(range(self.num_resolutions)):
             block = nn.ModuleList()
             attn = nn.ModuleList()
-            fuse_block = nn.ModuleList()
             block_out = ch * ch_mult[i_level]
             for i_block in range(self.num_res_blocks + 1):
                 block.append(ResnetBlock(in_channels=block_in, out_channels=block_out, dropout=dropout))
                 block_in = block_out
                 if i_level == self.num_resolutions - 1 and using_sa:
-                    attn.append(make_multi_cross_attn(block_in, head_size, using_sa=True))
-                    fuse_block.append(FuseBlock(block_in, block_in))
+                    attn.append(self.attn_fn(block_in, head_size, using_sa=True))
             up = nn.Module()
             up.block = block
             up.attn = attn
-            up.fuse_block = fuse_block
             if i_level != 0:
                 up.upsample = Upsample2x(block_in)
             self.up.insert(0, up)  # prepend to get consistent order
@@ -329,13 +303,12 @@ class Decoder(nn.Module):
         self.norm_out = Normalize(block_in)
         self.conv_out = torch.nn.Conv2d(block_in, in_channels, kernel_size=3, stride=1, padding=1)
 
-    def forward(self, z, hs, w=1):
+    def forward(self, z, hs):
         # z to block_in
         # middle
         enc_feat = hs['mid_attn']
         dec_feat = self.mid.block_1(self.conv_in(z))
         h = self.mid.block_2(self.mid.attn_1(dec_feat, enc_feat))
-        h = self.mid_fuse_block(enc_feat, h, w)
 
         # upsampling
         for i_level in reversed(range(self.num_resolutions)):
@@ -347,7 +320,6 @@ class Decoder(nn.Module):
                     else:
                         enc_feat = hs['block_' + str(i_level)]
                     h = self.up[i_level].attn[i_block](h, enc_feat)
-                    h = self.up[i_level].fuse_block[i_block](enc_feat, h, w)
             if i_level != 0:
                 h = self.up[i_level].upsample(h)
 
