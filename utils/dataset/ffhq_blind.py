@@ -130,8 +130,7 @@ class FFHQBlind(data.Dataset):
     def generate_lq(self, img_gt):
         h, w, _ = img_gt.shape
         # blur
-        assert self.blur_kernel_size[0] < self.blur_kernel_size[1], 'Wrong blur kernel size range'
-        cur_kernel_size = random.randint(self.blur_kernel_size[0], self.blur_kernel_size[1]) * 2 + 1
+        cur_kernel_size = random.choice(self.blur_kernel_size)
         kernel = degradations.random_mixed_kernels(
             self.kernel_list,
             self.kernel_prob,

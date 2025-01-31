@@ -144,8 +144,7 @@ class FFHQBlindUneven(data.Dataset):
         uneven = np.random.uniform()
         for i in range(2):
             # blur
-            assert self.blur_kernel_size[0] < self.blur_kernel_size[1], 'Wrong blur kernel size range'
-            cur_kernel_size = random.randint(self.blur_kernel_size[0], self.blur_kernel_size[1]) * 2 + 1
+            cur_kernel_size = random.choice(self.blur_kernel_size)
             kernel = degradations.random_mixed_kernels(
                 self.kernel_list,
                 self.kernel_prob,

@@ -375,4 +375,4 @@ if __name__ == '__main__':
 
     for i in range(4):
         ds = FFHQBlind(root=f'{args.data}{i+1}', split='train', opt=opt)
-        inference(i, ds)
+        inference(i+1, ds)
