@@ -65,12 +65,12 @@ class VQVAE(nn.Module):
             [p.requires_grad_(False) for p in self.parameters()]
 
     # ===================== `forward` is only used in VAE training =====================
-    def forward(self, lq, ret_usages=False):   # -> rec_B3HW, idx_N, loss
+    def forward(self, lq, w=1, ret_usages=False):   # -> rec_B3HW, idx_N, loss
         VectorQuantizer2.forward
         hs = self.encoder(lq)
         h = hs['out']
         f_hat, vq_loss, usages = self.quantize(self.quant_conv(h), ret_usages=ret_usages)
-        return self.decoder(self.post_quant_conv(f_hat), hs), vq_loss, usages
+        return self.decoder(self.post_quant_conv(f_hat), hs, w=w), vq_loss, usages
     # ===================== `forward` is only used in VAE training =====================
 
     def inference(self, lq, ret_usages=False):
@@ -81,8 +81,8 @@ class VQVAE(nn.Module):
         img = self.fhat_to_img(f_hat, hs)
         return img, vq_loss, usages
 
-    def fhat_to_img(self, f_hat: torch.Tensor, hs):
-        return self.decoder(self.post_quant_conv(f_hat), hs).clamp_(min=-1, max=1)
+    def fhat_to_img(self, f_hat: torch.Tensor, hs, w=1):
+        return self.decoder(self.post_quant_conv(f_hat), hs, w=w).clamp_(min=-1, max=1)
 
     def img_to_idxBl(self, inp_img_no_grad: torch.Tensor, v_patch_nums: Optional[Sequence[Union[int, Tuple[int, int]]]] = None) -> List[torch.LongTensor]:    # return List[Bl]
         f = self.quant_conv(self.encoder(inp_img_no_grad))
@@ -97,19 +97,19 @@ class VQVAE(nn.Module):
             ms_h_BChw.append(self.quantize.embedding(idx_Bl).transpose(1, 2).view(B, self.Cvae, pn, pn))
         return self.embed_to_img(ms_h_BChw=ms_h_BChw, all_to_max_scale=same_shape, last_one=last_one)
 
-    def embed_to_img(self, ms_h_BChw: List[torch.Tensor], all_to_max_scale: bool, last_one=False) -> Union[List[torch.Tensor], torch.Tensor]:
+    def embed_to_img(self, ms_h_BChw: List[torch.Tensor], all_to_max_scale: bool, last_one=False, w=1) -> Union[List[torch.Tensor], torch.Tensor]:
         if last_one:
-            return self.decoder(self.post_quant_conv(self.quantize.embed_to_fhat(ms_h_BChw, all_to_max_scale=all_to_max_scale, last_one=True))).clamp_(-1, 1)
+            return self.decoder(self.post_quant_conv(self.quantize.embed_to_fhat(ms_h_BChw, all_to_max_scale=all_to_max_scale, last_one=True)), w=w).clamp_(-1, 1)
         else:
-            return [self.decoder(self.post_quant_conv(f_hat)).clamp_(-1, 1) for f_hat in self.quantize.embed_to_fhat(ms_h_BChw, all_to_max_scale=all_to_max_scale, last_one=False)]
+            return [self.decoder(self.post_quant_conv(f_hat), w=w).clamp_(-1, 1) for f_hat in self.quantize.embed_to_fhat(ms_h_BChw, all_to_max_scale=all_to_max_scale, last_one=False)]
 
-    def img_to_reconstructed_img(self, x, v_patch_nums: Optional[Sequence[Union[int, Tuple[int, int]]]] = None, last_one=False) -> List[torch.Tensor]:
+    def img_to_reconstructed_img(self, x, v_patch_nums: Optional[Sequence[Union[int, Tuple[int, int]]]] = None, last_one=False, w=1) -> List[torch.Tensor]:
         f = self.quant_conv(self.encoder(x))
         ls_f_hat_BChw = self.quantize.f_to_idxBl_or_fhat(f, to_fhat=True, v_patch_nums=v_patch_nums)
         if last_one:
-            return self.decoder(self.post_quant_conv(ls_f_hat_BChw[-1])).clamp_(-1, 1)
+            return self.decoder(self.post_quant_conv(ls_f_hat_BChw[-1]), w=w).clamp_(-1, 1)
         else:
-            return [self.decoder(self.post_quant_conv(f_hat)).clamp_(-1, 1) for f_hat in ls_f_hat_BChw]
+            return [self.decoder(self.post_quant_conv(f_hat), w=w).clamp_(-1, 1) for f_hat in ls_f_hat_BChw]
 
     def load_state_dict(self, state_dict: Dict[str, Any], strict=True, assign=False, compat=False):
         print(f'Loading state dict with strict={strict}, assign={assign}, compat={compat}')
@@ -215,6 +215,7 @@ class VQVAE(nn.Module):
 
 
 if __name__ == '__main__':
+    import argparse
     import glob
     import math
 
@@ -223,7 +224,8 @@ if __name__ == '__main__':
     import torch
 
     from utils import dist_utils
-    import argparse
+    from utils.dataset.options import DataOptions
+
     parser = argparse.ArgumentParser()
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--data', type=str, default='')
@@ -320,79 +322,57 @@ if __name__ == '__main__':
         state_dict = state_dict['trainer']['vae_ema']
     vae.load_state_dict(state_dict, strict=True, compat=False)
     # vae_ckpt = '/Users/katz/Downloads/vae_ch160v4096z32.pth'
-    # vae.load_state_dict(torch.load(vae_ckpt, map_location='cpu'), strict=True, compat=True)
-    # torch.save(vae.state_dict(), os.path.join(out_path, 'pt_vae_ch160v4096z32_new.pth'))
+    # vae.load_state_dict(torch.load(vae_ckpt, map_location='cpu'), strict=False, compat=True)
+    # torch.save(vae.state_dict(), os.path.join('./', 'pt_vae_ch160v4096z32_new2.pth'))
 
     from utils.dataset.ffhq_blind import FFHQBlind
     import torchvision
     import numpy as np
 
     # validate
-    opt = {
-        'out_size': 256,
-        'mid_size': 288,
-        'random_crop_ratio': 1.,
-        'identify_ratio': 0.,
-        'blur_kernel_size': [19, 20],
-        'kernel_list': ['iso', 'aniso'],
-        'kernel_prob': [0.5, 0.5],
-        'blur_sigma': [0.1, 10],
-        'downsample_range': [0.8, 8],
-        'noise_range': [0, 20],
-        'jpeg_range': [60, 100],
-        'use_hflip': True,
-        'color_jitter_prob': None,
-        'color_jitter_shift': 20,
-        'color_jitter_pt_prob': None,
-        'gray_prob': None,
-        'gt_gray': True,
-        'exposure_prob': None,
-        'exposure_range': [0.7, 1.1],
-        'shift_prob': None,
-        'shift_unit': 1,
-        'shift_max_num': 32,
-        'uneven_prob': None,
-        'hazy_prob': None,
-        'hazy_alpha': [0.75, 0.95],
-        'crop_components': False,
-        'component_path': 'FFHQ_eye_mouth_landmarks_512.pth',
-        'eye_enlarge_ratio': 1.4,
-    }
+    from pprint import pprint
+    opt = DataOptions.val_options()
+    pprint(opt)
+
     import json
     arg_opts = json.loads(args.opts)
     for k, v in arg_opts.items():
         print(f'Option updates: {k} {opt[k]} -> {k} {v}')
         opt[k] = v
-    ds = FFHQBlind(root=args.data, split='train', opt=opt)
-    lq_in_list = []
-    hq_in_list = []
-    for idx in range(len(ds)):
-        if idx > 20:
-            break
-        res = ds[idx]
-        lq, hq = res['lq'], res['gt']
-        lq_in_list.append(lq)
-        hq_in_list.append(hq)
-    lq = torch.stack(lq_in_list, dim=0)
-    hq = torch.stack(hq_in_list, dim=0)
-    print(lq.shape, hq.shape)
 
-    lq_res, vq_loss, usages = vae.inference(lq, ret_usages=True)
-    print(lq_res.max(), lq_res.mean(), lq_res.std())
-    print(lq_res.shape)
-    print(vq_loss)
-    print(usages)
+    import torch.utils.data as data
 
-    hq_res, vq_loss, usages = vae.inference(hq, ret_usages=True)
-    print(hq_res.max(), hq_res.mean(), hq_res.std())
-    print(hq_res.shape)
-    print(vq_loss)
-    print(usages)
 
-    res_img = torch.stack([hq, lq, hq_res, lq_res], dim=1)
-    res_img = torch.reshape(res_img, (-1, 3, 256, 256))
-    img = denormalize_pm1_into_01(res_img)
-    chw = torchvision.utils.make_grid(img, nrow=4, padding=0, pad_value=1.0)
-    chw = chw.permute(1, 2, 0).mul_(255).cpu().numpy()
-    chw = PImage.fromarray(chw.astype(np.uint8))
-    chw.save(os.path.join(root, f'{args.out}.png'))
+    def inference(i, ds: data.Dataset):
+        lq_in_list = []
+        hq_in_list = []
+        for idx in range(len(ds)):
+            if idx > 20:
+                break
+            res = ds[idx]
+            lq, hq = res['lq'], res['gt']
+            lq_in_list.append(lq)
+            hq_in_list.append(hq)
+        lq = torch.stack(lq_in_list, dim=0)
+        hq = torch.stack(hq_in_list, dim=0)
+        print(i, lq.shape, hq.shape)
+
+        lq_res, vq_loss, usages = vae.inference(lq, ret_usages=True)
+        print(i, vq_loss)
+        print(i, usages)
+
+        hq_res, vq_loss, usages = vae.inference(hq, ret_usages=True)
+        print(i, vq_loss)
+        print(i, usages)
+
+        res_img = torch.stack([hq, lq, hq_res, lq_res], dim=1)
+        res_img = torch.reshape(res_img, (-1, 3, 256, 256))
+        img = denormalize_pm1_into_01(res_img)
+        chw = torchvision.utils.make_grid(img, nrow=4, padding=0, pad_value=1.0)
+        chw = chw.permute(1, 2, 0).mul_(255).cpu().numpy()
+        chw = PImage.fromarray(chw.astype(np.uint8))
+        chw.save(os.path.join(root, f'dataset{i}-{args.out}.png'))
+
+    for i in range(4):
+        ds = FFHQBlind(root=f'{args.data}{i+1}', split='train', opt=opt)
+        inference(i, ds)

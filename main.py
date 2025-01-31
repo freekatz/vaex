@@ -22,6 +22,7 @@ from torch.utils.data import DataLoader
 from utils import dist_utils
 from utils import arg_util, misc
 from utils.data import build_data_loader
+from utils.dataset.options import DataOptions
 
 
 def build_tensorboard_logger(args: arg_util.Args):
@@ -179,36 +180,7 @@ def build_things_from_args(args: arg_util.Args):
 
     # build data
     print(f'[build PT data] ...\n')
-    train_opt = {
-        'out_size': 256,
-        'mid_size': 288,  # train
-        'random_crop_ratio': 0.8,  # train
-        'identify_ratio': 0.,
-        'blur_kernel_size': [19, 20],
-        'kernel_list': ['iso', 'aniso'],
-        'kernel_prob': [0.5, 0.5],
-        'blur_sigma': [0.1, 10],
-        'downsample_range': [0.8, 8],
-        'noise_range': [0, 20],
-        'jpeg_range': [60, 100],
-        'use_hflip': True,
-        'color_jitter_prob': None,
-        'color_jitter_shift': 20,
-        'color_jitter_pt_prob': None,
-        'gray_prob': 0.008,  # train
-        'gt_gray': True,
-        'exposure_prob': None,
-        'exposure_range': [0.7, 1.1],
-        'shift_prob': 0.2,  # train
-        'shift_unit': 1,
-        'shift_max_num': 32,
-        'uneven_prob': 0.1,  # train
-        'hazy_prob': 0.008,  # train
-        'hazy_alpha': [0.75, 0.95],
-        'crop_components': False,
-        'component_path': args.face_path,
-        'eye_enlarge_ratio': 1.4,
-    }
+    train_opt = DataOptions.train_options(args)
     ld_train = build_data_loader(args, start_ep, start_it, dataset=None, dataset_params={'opt': train_opt}, split='train')
 
     [print(line) for line in auto_resume_info]

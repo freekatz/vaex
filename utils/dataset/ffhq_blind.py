@@ -14,6 +14,7 @@ from basicsr.utils import img2tensor
 
 from utils.dataset.my_transforms import cv2_loader, random_add_jpg_compression, normalize_01_into_pm1, \
     random_add_gaussian_noise, denormalize_pm1_into_01, pil_loader
+from utils.dataset.options import DataOptions
 
 
 class FFHQBlind(data.Dataset):
@@ -25,8 +26,7 @@ class FFHQBlind(data.Dataset):
         # load dataset
         split_file = os.path.join(self.root, f'ffhq_{split}.txt')
         with open(split_file, 'r') as file:
-            self.samples = [os.path.join(self.root, line.strip()) for line in file.readlines() if
-                            line.find('.png') != -1]
+            self.samples = [os.path.join(self.root, line.strip()) for line in file.readlines()]
         assert (len(self.samples) > 0)
         self.loader = pil_loader
 
@@ -223,39 +223,12 @@ if __name__ == '__main__':
 
     data = '../../tmp'
     # validate
-    opt = {
-        'out_size': 256,
-        'mid_size': -1,
-        'random_crop_ratio': 0.,
-        'identify_ratio': 0.,
-        'blur_kernel_size': [19, 20],
-        'kernel_list': ['iso', 'aniso'],
-        'kernel_prob': [0.5, 0.5],
-        'blur_sigma': [0.1, 10],
-        'downsample_range': [0.8, 8],
-        'noise_range': [0, 20],
-        'jpeg_range': [60, 100],
-        'use_hflip': True,
-        'color_jitter_prob': None,
-        'color_jitter_shift': 20,
-        'color_jitter_pt_prob': None,
-        'gray_prob': None,
-        'gt_gray': True,
-        'exposure_prob': None,
-        'exposure_range': [0.7, 1.1],
-        'shift_prob': None,
-        'shift_unit': 1,
-        'shift_max_num': 32,
-        'uneven_prob': None,
-        'hazy_prob': None,
-        'hazy_alpha': [0.75, 0.95],
-        'crop_components': False,
-        'component_path': 'FFHQ_eye_mouth_landmarks_512.pth',
-        'eye_enlarge_ratio': 1.4,
-    }
+    from pprint import pprint
+    opt = DataOptions.val_options()
+    pprint(opt)
 
     ds = FFHQBlind(root=data, split='train', opt=opt)
-    res = ds[6]
+    res = ds[0]
     lq, hq = res['lq'], res['gt']
     print(lq.size())
     print(hq.size())
