@@ -317,13 +317,13 @@ if __name__ == '__main__':
     vae.eval()
 
     # trainer
-    vae_ckpt = '/Users/katz/Downloads/vae_ch160v4096z32.pth'
+    # vae_ckpt = '/Users/katz/Downloads/vae_ch160v4096z32.pth'
     state_dict = torch.load(vae_ckpt, map_location='cpu')
     if 'trainer' in state_dict.keys():
         state_dict = state_dict['trainer']['vae_ema']
-    # vae.load_state_dict(state_dict, strict=True, compat=False)
-    vae.load_state_dict(torch.load(vae_ckpt, map_location='cpu'), strict=False, compat=True)
-    torch.save(vae.state_dict(), '/Users/katz/Downloads/pt_vae_ch160v4096z32_new2.pth')
+    vae.load_state_dict(state_dict, strict=True, compat=False)
+    # vae.load_state_dict(torch.load(vae_ckpt, map_location='cpu'), strict=False, compat=True)
+    # torch.save(vae.state_dict(), '/Users/katz/Downloads/pt_vae_ch160v4096z32_new2.pth')
 
     from utils.dataset.ffhq_blind import FFHQBlind
     import torchvision
