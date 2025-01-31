@@ -42,14 +42,16 @@ def build_tensorboard_logger(args: arg_util.Args):
 
 def build_model(args: arg_util.Args):
     # import heavy packages after Dataloader object creation
-    from models import build_vae_disc, VQVAE, DinoDisc
+    from models import build_vae_disc, BFR, VQVAE, DinoDisc
 
     # build models
-    vae_wo_ddp, disc_wo_ddp = build_vae_disc(args)
-    vae_wo_ddp: VQVAE
+    bfr_wo_ddp, vae_lq, vae_hq, disc_wo_ddp = build_vae_disc(args)
+    bfr_wo_ddp: BFR
+    vae_lq: VQVAE
+    vae_hq: VQVAE
     disc_wo_ddp: DinoDisc
 
-    print(f'[PT] VAE model ({args.vae}) = {vae_wo_ddp}\n')
+    print(f'[PT] BFR model ({args.vae}) = {BFR}\n')
     if isinstance(disc_wo_ddp, DinoDisc):
         print(f'[PT] Disc model (frozen part) = {disc_wo_ddp.dino_proxy[0]}\n')
     print(f'[PT] Disc model (trainable part) = {disc_wo_ddp}\n\n')
@@ -58,8 +60,7 @@ def build_model(args: arg_util.Args):
     # assert all(p.requires_grad for p in disc_wo_ddp.parameters())
     count_p = lambda m: f'{sum(p.numel() for p in m.parameters()) / 1e6:.2f}'
     print(f'[PT][#para] ' + ', '.join([f'{k}={count_p(m)}' for k, m in (
-        ('VAE', vae_wo_ddp), ('VAE.enc', vae_wo_ddp.encoder), ('VAE.dec', vae_wo_ddp.decoder),
-        ('VAE.quant', vae_wo_ddp.quantize)
+        ('BFR', bfr_wo_ddp), ('VAE_lq', bfr_wo_ddp.vae_lq), ('VAE_hq', bfr_wo_ddp.vae_hq)
     )]))
     print(f'[PT][#para] ' + ', '.join([f'{k}={count_p(m)}' for k, m in (
         ('Disc', disc_wo_ddp),
@@ -67,17 +68,17 @@ def build_model(args: arg_util.Args):
         # ('fpn_conv', disc_wo_ddp.ls_fpn_conv), ('head', disc_wo_ddp.ls_head), ('down', disc_wo_ddp.ls_down),
         # ('glb_cls', disc_wo_ddp.glb_cls),
     )]) + '\n\n')
-    return vae_wo_ddp, disc_wo_ddp
+    return bfr_wo_ddp, vae_lq, vae_hq, disc_wo_ddp
 
 
-def build_optimizer(args: arg_util.Args, vae_wo_ddp, disc_wo_ddp):
+def build_optimizer(args: arg_util.Args, bfr_wo_ddp, disc_wo_ddp):
     from utils.amp_opt import AmpOptimizer
     from utils.lr_control import filter_params
     from utils import optimizer
 
     optimizers: List[AmpOptimizer] = []
     for model_name, model_wo_ddp, opt_beta, lr, wd, clip in (
-    ('vae', vae_wo_ddp, args.vae_opt_beta, args.vae_lr, args.vae_wd, args.grad_clip),
+    ('bfr', bfr_wo_ddp, args.vae_opt_beta, args.vae_lr, args.vae_wd, args.grad_clip),
     ('dis', disc_wo_ddp, args.disc_opt_beta, args.disc_lr, args.disc_wd, args.grad_clip)):
 
         # sync model parameters
@@ -139,14 +140,15 @@ def maybe_pretrain(args: arg_util.Args) -> dict:
     if pretrain is None or pretrain == '':
         return {}
     try:
-        ckpt = torch.load(pretrain, map_location='cpu')
+        ckpt_lq = torch.load(pretrain, map_location='cpu')
+        ckpt_hq = torch.load(pretrain, map_location='cpu')
     except Exception as e:
         print(f'[pretrain] load failed, {e} @ {pretrain}')
         return {}
 
     dist_utils.barrier()
     trainer_state = {
-        'vae_wo_ddp': ckpt,
+        'vae_wo_ddp': (ckpt_lq, ckpt_hq),
     }
     print(f'[pretrain] load success @ {pretrain}')
     return trainer_state
@@ -193,9 +195,9 @@ def build_things_from_args(args: arg_util.Args):
     print(f'[dataloader] gbs={args.bs}, lbs={args.lbs}, iters_train={iters_train}')
 
     # build model
-    vae_wo_ddp, disc_wo_ddp = build_model(args)
+    bfr_wo_ddp, vae_lq, vae_hq, disc_wo_ddp = build_model(args)
 
-    model_size, trainable_model_size = cal_model_params(vae_wo_ddp)
+    model_size, trainable_model_size = cal_model_params(bfr_wo_ddp)
     print('Number of vae params: %.4f M' % (model_size / 1e6))
     print('Number of vae trainable params: %.4f M' % (trainable_model_size / 1e6))
 
@@ -204,34 +206,37 @@ def build_things_from_args(args: arg_util.Args):
     print('Number of dino trainable params: %.4f M' % (trainable_model_size / 1e6))
 
     # build optimizers
-    optimizers = build_optimizer(args, vae_wo_ddp, disc_wo_ddp)
-    vae_optim, disc_optim = optimizers[0], optimizers[1]
+    optimizers = build_optimizer(args, bfr_wo_ddp, disc_wo_ddp)
+    bfr_optim, disc_optim = optimizers[0], optimizers[1]
 
     # compile model
     from torch.nn.parallel import DistributedDataParallel as DDP
     from utils.trainer import VAETrainer
     from utils.lpips import LPIPS
-    vae_wo_ddp, disc_wo_ddp = args.compile_model(vae_wo_ddp, args.compile_vae), args.compile_model(disc_wo_ddp, args.compile_disc)
+    bfr_wo_ddp = args.compile_model(bfr_wo_ddp, args.compile_vae)
+    vae_lq = args.compile_model(vae_lq, args.compile_vae)
+    vae_hq = args.compile_model(vae_hq, args.compile_vae)
+    disc_wo_ddp = args.compile_model(disc_wo_ddp, args.compile_disc)
     lpips_loss: LPIPS = args.compile_model(LPIPS(args.lpips_path).to(args.device), fast=args.compile_lpips)
     
     # distributed wrapper
     ddp_class = DDP if dist_utils.initialized() else NullDDP
-    vae: DDP = ddp_class(vae_wo_ddp, device_ids=[dist_utils.get_local_rank()], find_unused_parameters=True, static_graph=args.ddp_static, broadcast_buffers=False)
+    bfr: DDP = ddp_class(bfr_wo_ddp, device_ids=[dist_utils.get_local_rank()], find_unused_parameters=True, static_graph=args.ddp_static, broadcast_buffers=False)
     disc: DDP = ddp_class(disc_wo_ddp, device_ids=[dist_utils.get_local_rank()], find_unused_parameters=True, static_graph=args.ddp_static, broadcast_buffers=False)
     
-    vae_optim.model_maybe_fsdp = vae if args.zero else vae_wo_ddp
+    bfr_optim.model_maybe_fsdp = bfr if args.zero else bfr_wo_ddp
     disc_optim.model_maybe_fsdp = disc if args.zero else disc_wo_ddp
     
     trainer = VAETrainer(
         is_visualizer=dist_utils.is_master(),
-        vae=vae, vae_wo_ddp=vae_wo_ddp, disc=disc, disc_wo_ddp=disc_wo_ddp, ema_ratio=args.ema,
-        dcrit=args.dcrit, vae_opt=vae_optim, disc_opt=disc_optim,
+        vae=bfr, vae_wo_ddp=bfr_wo_ddp, disc=disc, disc_wo_ddp=disc_wo_ddp, ema_ratio=args.ema,
+        dcrit=args.dcrit, vae_opt=bfr_optim, disc_opt=disc_optim,
         daug=args.disc_aug_prob, lpips_loss=lpips_loss, lp_reso=args.lpr, wei_l1=args.l1, wei_l2=args.l2, wei_entropy=args.le, wei_lpips=args.lp, wei_disc=args.ld, adapt_type=args.gada, bcr=args.bcr, bcr_cut=args.bcr_cut, reg=args.reg, reg_every=args.reg_every,
         disc_grad_ckpt=args.disc_grad_ckpt,
     )
     if trainer_state is not None and len(trainer_state):
         trainer.load_state_dict(trainer_state, strict=True)
-    del vae, vae_wo_ddp, disc, disc_wo_ddp, vae_optim, disc_optim
+    del bfr, bfr_wo_ddp, disc, disc_wo_ddp, bfr_optim, disc_optim
 
     return (
         tb_lg, trainer,
@@ -319,7 +324,7 @@ def train_one_ep(ep: int, is_first_ep: bool, start_it: int, args: arg_util.Args,
                     f"speed: {iter_speed:.3f} ({min(tails):.3f}~{max(tails):.2f}) sec/iter  |  "
                     f"{img_per_sec:.1f} imgs/sec  |  "
                     f"{img_per_day:.2f}M imgs/day  |  "
-                    f"{img_per_day*(args.img_size//trainer.vae_wo_ddp.downsample)**2/1e3:.2f}B token/day  ||  "
+                    f"{img_per_day*(args.img_size//trainer.vae_wo_ddp.vaq_lq.downsample)**2/1e3:.2f}B token/day  ||  "
                     f"Peak nvidia-smi: {args.max_nvidia_smi:.2f} GB  ||  "
                     f"PyTorch mem - "
                     f"alloc: {memory_allocated:.2f}  |  "

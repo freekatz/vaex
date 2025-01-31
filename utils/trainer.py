@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from matplotlib.colors import ListedColormap
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from models import VectorQuantizer2, VQVAE, DinoDisc
+from models import VectorQuantizer2, VQVAE, DinoDisc, BFR
 from utils import arg_util, misc, nan
 from utils.amp_opt import AmpOptimizer
 from utils.diffaug import DiffAug
@@ -26,7 +26,7 @@ BTen = torch.BoolTensor
 class VAETrainer(object):
     def __init__(
         self, is_visualizer: bool,
-        vae: DDP, vae_wo_ddp: VQVAE, disc: DDP, disc_wo_ddp: DinoDisc, ema_ratio: float,  # decoder, en_de_lin=True, seg_embed=False,
+        vae: DDP, vae_wo_ddp: BFR, disc: DDP, disc_wo_ddp: DinoDisc, ema_ratio: float,  # decoder, en_de_lin=True, seg_embed=False,
         dcrit: str, vae_opt: AmpOptimizer, disc_opt: AmpOptimizer,
         daug=1.0, lpips_loss: LPIPS = None, lp_reso=64, wei_l1=1.0, wei_l2=0.0, wei_entropy=0.0, wei_lpips=0.5, wei_disc=0.6, adapt_type=1, bcr=5.0, bcr_cut=0.5, reg=0.0, reg_every=16,
         disc_grad_ckpt=False,
@@ -35,7 +35,7 @@ class VAETrainer(object):
 
         self.vae, self.disc = vae, disc
         self.vae_opt, self.disc_opt = vae_opt, disc_opt
-        self.vae_wo_ddp: VQVAE = vae_wo_ddp  # after torch.compile
+        self.vae_wo_ddp: BFR = vae_wo_ddp  # after torch.compile
         self.disc_wo_ddp: DinoDisc = disc_wo_ddp  # after torch.compile
         self.vae_params: Tuple[nn.Parameter] = tuple(self.vae_wo_ddp.parameters())
         self.disc_params: Tuple[nn.Parameter] = tuple(self.disc_wo_ddp.parameters())
@@ -43,10 +43,10 @@ class VAETrainer(object):
         self.ema_ratio = ema_ratio
         self.is_visualizer = is_visualizer
         self.using_ema = is_visualizer
-        if self.using_ema:
-            self.vae_ema: VQVAE = deepcopy(vae_wo_ddp).eval()
-        else:
-            self.vae_ema: VQVAE = None
+        # if self.using_ema:
+        #     self.vae_ema: VQVAE = deepcopy(vae_wo_ddp).eval()
+        # else:
+        #     self.vae_ema: VQVAE = None
         
         self.cmap_sim: ListedColormap = sns.color_palette('viridis', as_cmap=True)
         
@@ -87,7 +87,7 @@ class VAETrainer(object):
         with maybe_record_function('VAE_rec'):
             with self.vae_opt.amp_ctx:
                 self.vae_wo_ddp.forward
-                rec_B3HW, Lq, usage = self.vae(lq, ret_usages=loggable)
+                rec_B3HW, rec_B3HW_hq, Lq, Lq_hq, usage, usage_hq = self.vae(lq, ret_usages=loggable)
                 B = rec_B3HW.shape[0]
                 inp_rec_no_grad = torch.cat((hq, rec_B3HW.data), dim=0)
             
@@ -96,6 +96,7 @@ class VAETrainer(object):
             Lrec *= self.wei_l1
             if self.wei_l2 > 0:
                 Lrec += F.mse_loss(rec_B3HW, hq).mul_(self.wei_l2)
+                Lrec += F.mse_loss(rec_B3HW_hq, lq).mul_(self.wei_l2)
             # if self.wei_llaplace > 0:
             #     inp_01_09 = inp.mul(0.4).add_(0.5)
             #     dist = (rec_B3HW.sigmoid() - inp_01_09.sigmoid()).abs()
@@ -122,35 +123,35 @@ class VAETrainer(object):
                 self.disc_wo_ddp.train()
                 
                 wei_g = warmup_disc_schedule * self.wei_disc
-                if self.adapt_wei_disc:
-                    last_layer = self.vae_wo_ddp.decoder.conv_out.weight
-                    w = (
-                        torch.autograd.grad(Lnll, last_layer, retain_graph=True)[0].data.norm()
-                        / (torch.autograd.grad(Lg, last_layer, retain_graph=True)[0].data.norm().add_(1e-6))
-                    )
-                    if self.adapt_type % 10 == 0:
-                        w.clamp_(0.0, 1e4)
-                    elif self.adapt_type % 10 == 1:
-                        w.clamp_(0.015, 1e4)
-                    elif self.adapt_type % 10 == 2:
-                        w.clamp_(0.1, 10)
-                        w = min(max(w, 0.1), 10)
-                    elif self.adapt_type % 10 == 3:
-                        w.clamp_(0.0, 1e4).sqrt_()
-                    
-                    if self.adapt_type >= 10:
-                        if self.ema_gada is None:
-                            self.ema_gada = w
-                        else:
-                            self.ema_gada.mul_(0.9).add_(w, alpha=0.1)
-                            w = self.ema_gada
-                    wei_g = wei_g * w
+                # if self.adapt_wei_disc:
+                #     last_layer = self.vae_wo_ddp.decoder.conv_out.weight
+                #     w = (
+                #         torch.autograd.grad(Lnll, last_layer, retain_graph=True)[0].data.norm()
+                #         / (torch.autograd.grad(Lg, last_layer, retain_graph=True)[0].data.norm().add_(1e-6))
+                #     )
+                #     if self.adapt_type % 10 == 0:
+                #         w.clamp_(0.0, 1e4)
+                #     elif self.adapt_type % 10 == 1:
+                #         w.clamp_(0.015, 1e4)
+                #     elif self.adapt_type % 10 == 2:
+                #         w.clamp_(0.1, 10)
+                #         w = min(max(w, 0.1), 10)
+                #     elif self.adapt_type % 10 == 3:
+                #         w.clamp_(0.0, 1e4).sqrt_()
+                #
+                #     if self.adapt_type >= 10:
+                #         if self.ema_gada is None:
+                #             self.ema_gada = w
+                #         else:
+                #             self.ema_gada.mul_(0.9).add_(w, alpha=0.1)
+                #             w = self.ema_gada
+                #     wei_g = wei_g * w
                 
                 # Lv = Lnll + Lq + self.wei_entropy * Le + wei_g * Lg
-                Lv = Lnll + Lq + wei_g * Lg
+                Lv = Lnll + Lq + Lq_hq + wei_g * Lg
         else:
             # Lv = Lnll + Lq + self.wei_entropy * Le
-            Lv = Lnll + Lq
+            Lv = Lnll + Lq + Lq_hq
             Lg = torch.tensor(0.)
             wei_g = None
         
@@ -206,9 +207,9 @@ class VAETrainer(object):
         
         # [zero_grad]
         if stepping:
-            if self.using_ema:
-                with maybe_record_function('EMA_upd'):
-                    self.ema_update(g_it)
+            # if self.using_ema:
+            #     with maybe_record_function('EMA_upd'):
+            #         self.ema_update(g_it)
             with maybe_record_function('opt_step'):
                 self.vae_opt.optimizer.zero_grad(set_to_none=True)
                 self.disc_opt.optimizer.zero_grad(set_to_none=True)
@@ -223,7 +224,7 @@ class VAETrainer(object):
             # [tensorboard logging]
             if loggable:
                 # Lbcr, Lq, Le, Lg = Lbcr.item(), Lq.item(), Le if isinstance(Le, (int, float)) else Le.item(), Lg.item()
-                Lbcr, Lq, Lg = Lbcr.item(), Lq.item(), Lg.item()
+                Lbcr, Lq, Lq_hq, Lg = Lbcr.item(), Lq.item(), Lq_hq.item(), Lg.item()
 
                 # vae_vocab_size = self.vae_wo_ddp.vocab_size
                 # prob_per_class_is_chosen = idx_N.bincount()
@@ -232,7 +233,7 @@ class VAETrainer(object):
                 # cluster_usage = (prob_per_class_is_chosen > 0.05 / vae_vocab_size).float().mean() * 100
                 kw = dict(
                     # total=Lnll + Lq + self.wei_disc * Lg,
-                    Nll=Lnll, RecL1=Lrec_for_log, quant=Lq,
+                    Nll=Lnll, RecL1=Lrec_for_log, quant=Lq, quantHQ=Lq_hq,
                     # z_log_perplex=log_perplexity, z_voc_usage=cluster_usage
                 )
                 kw[f'z_voc_usage'] = usage
@@ -291,7 +292,7 @@ class VAETrainer(object):
     
     def state_dict(self):
         state = {'config': self.get_config()}
-        for k in ('vae_wo_ddp', 'vae_ema', 'disc_wo_ddp', 'vae_opt', 'disc_opt'):
+        for k in ('vae_wo_ddp', 'disc_wo_ddp', 'vae_opt', 'disc_opt'):
             m = getattr(self, k)
             if m is not None:
                 if hasattr(m, '_orig_mod'):
@@ -305,7 +306,7 @@ class VAETrainer(object):
         if len(state) == 1:
             ks = {'vae_wo_ddp'}
         else:
-            ks =  ('vae_wo_ddp', 'vae_ema', 'disc_wo_ddp', 'vae_opt', 'disc_opt')
+            ks =  ('vae_lq', 'vae_hq', 'vae_wo_ddp', 'vae_ema', 'disc_wo_ddp', 'vae_opt', 'disc_opt')
         for k in ks:
             m = getattr(self, k)
             if m is not None:
@@ -313,7 +314,7 @@ class VAETrainer(object):
                     m = m._orig_mod
 
                 if k == 'vae_wo_ddp' or k == 'vae_ema':
-                    ret = m.load_state_dict(state[k], strict=strict)
+                    ret = m.load_state_dict(state[k], strict=strict, compat=True)
                 else:
                     ret = m.load_state_dict(state[k], strict=strict)
                 if ret is not None:
