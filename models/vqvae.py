@@ -236,8 +236,6 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     device = 'cpu'
-    # dist_utils.init_distributed_mode(local_out_path='../tmp', timeout_minutes=30)
-
     seed = args.seed
     import random
     def seed_everything(self):
@@ -266,47 +264,6 @@ if __name__ == '__main__':
     def denormalize_pm1_into_01(x):  # normalize x from [-1, 1] to [0, 1] by (x + 1)/2
         return x.add(1)/2
 
-    def img_folder_to_tensor(img_folder: str, transform: transforms.Compose, img_size: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        ori_aug = transforms.Compose(
-            [
-                transforms.Resize((img_size, img_size), interpolation=InterpolationMode.LANCZOS),
-                transforms.ToTensor()
-            ]
-        )
-        # mid_reso = 1.125
-        # final_reso = 256
-        # mid_reso = round(min(mid_reso, 2) * final_reso)
-        # ori_aug = transforms.Compose(
-        #     [
-        #         transforms.Resize(mid_reso, interpolation=InterpolationMode.LANCZOS),
-        #         transforms.CenterCrop((final_reso, final_reso)),
-        #         # transforms.Resize(final_reso, interpolation=InterpolationMode.LANCZOS),
-        #         transforms.ToTensor(), normalize_01_into_pm1
-        #     ]
-        # )
-        img_list = glob.glob(f'{img_folder}/*.png')
-        img_all = []
-        ori_img_all = []
-        for img_path in img_list:
-            img_tensor = transform(PImage.open(img_path))
-            origin_img_tensor = ori_aug(PImage.open(img_path))
-            img_all.append(img_tensor)
-            ori_img_all.append(origin_img_tensor)
-        img_tensor = torch.stack(img_all, dim=0)
-        origin_img_tensor = torch.stack(ori_img_all, dim=0)
-        return origin_img_tensor, img_tensor
-
-    def tensor_to_img(img_tensor: torch.Tensor) -> PImage.Image:
-        B, C, H, W = img_tensor.shape
-        assert int(math.sqrt(B)) * int(math.sqrt(B)) == B
-        b = int(math.sqrt(B))
-        img_tensor = torch.permute(img_tensor, (1, 0, 2, 3))
-        img_tensor = torch.reshape(img_tensor, (C, b, b * H, W))
-        img_tensor = torch.permute(img_tensor, (0, 2, 1, 3))
-        img_tensor = torch.reshape(img_tensor, (C, b * H, b * W))
-        img = transforms.ToPILImage()(img_tensor)
-        return img
-
     import sys
     from pathlib import Path
     import os
@@ -314,7 +271,9 @@ if __name__ == '__main__':
     vae_ckpt = args.ckpt
     B, C, H, W = 4, 3, 256, 256
     vae = VQVAE(vocab_size=4096, z_channels=32, ch=160, test_mode=True,
-                share_quant_resi=4, v_patch_nums=(1, 2, 3, 4, 5, 6, 8, 10, 13, 16)).to(device)
+                share_quant_resi=4, v_patch_nums=(1, 2, 3, 4, 5, 6, 8, 10, 13, 16),
+                head_size=1,
+                ).to(device)
     vae.eval()
 
     # trainer
@@ -343,7 +302,6 @@ if __name__ == '__main__':
 
     import torch.utils.data as data
 
-
     def inference(i, ds: data.Dataset):
         lq_in_list = []
         hq_in_list = []
@@ -366,10 +324,11 @@ if __name__ == '__main__':
         print(i, vq_loss)
         print(i, usages)
 
-        res_img = torch.stack([hq, lq, hq_res, lq_res], dim=1)
+        res = [hq, lq, hq_res, lq_res]
+        res_img = torch.stack(res, dim=1)
         res_img = torch.reshape(res_img, (-1, 3, 256, 256))
         img = denormalize_pm1_into_01(res_img)
-        chw = torchvision.utils.make_grid(img, nrow=4, padding=0, pad_value=1.0)
+        chw = torchvision.utils.make_grid(img, nrow=len(res), padding=0, pad_value=1.0)
         chw = chw.permute(1, 2, 0).mul_(255).cpu().numpy()
         chw = PImage.fromarray(chw.astype(np.uint8))
         filename = f'dataset{i}-{args.out}.png'

@@ -27,7 +27,7 @@ def build_vae_disc(args: Args) -> Tuple[VQVAE, DinoDisc]:
     vae = VQVAE(vocab_size=args.vocab_size, z_channels=args.vocab_width, ch=args.ch,
                 using_znorm=args.vocab_norm, beta=args.vq_beta, dropout=args.drop_out,
                 share_quant_resi=4, quant_conv_ks=3, quant_resi=0.5,
-                v_patch_nums=args.patch_nums, test_mode=False).to(args.device)
+                v_patch_nums=args.patch_nums, head_size=1, test_mode=False).to(args.device)
     disc = DinoDisc(
         device=args.device, dino_ckpt_path=args.dino_path, depth=args.dino_depth, key_depths=(2, 5, 8, 11),
         ks=args.dino_kernel_size, norm_type=args.disc_norm, using_spec_norm=args.disc_spec_norm, norm_eps=1e-6,

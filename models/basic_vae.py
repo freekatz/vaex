@@ -171,11 +171,11 @@ class MultiHeadAttnBlock(nn.Module):
         return kv+w_
 
 
-def make_attn(in_channels, using_sa=True):
+def make_attn(in_channels, using_sa=True, **kwargs):
     return AttnBlock(in_channels) if using_sa else nn.Identity()
 
 
-def make_multi_cross_attn(in_channels, head_size=1, using_sa=True):
+def make_multi_cross_attn(in_channels, head_size=1, using_sa=True, **kwargs):
     return MultiHeadAttnBlock(in_channels, head_size) if using_sa else nn.Identity()
 
 
@@ -207,7 +207,7 @@ class Encoder(nn.Module):
                 block.append(ResnetBlock(in_channels=block_in, out_channels=block_out, dropout=dropout))
                 block_in = block_out
                 if i_level == self.num_resolutions - 1 and using_sa:
-                    attn.append(self.attn_fn(block_in, head_size, using_sa=True))
+                    attn.append(self.attn_fn(in_channels=block_in, head_size=head_size, using_sa=True))
             down = nn.Module()
             down.block = block
             down.attn = attn
@@ -219,7 +219,7 @@ class Encoder(nn.Module):
         self.mid = nn.Module()
         block_in = ch * in_ch_mult[self.num_resolutions]
         self.mid.block_1 = ResnetBlock(in_channels=block_in, out_channels=block_in, dropout=dropout)
-        self.mid.attn_1 = self.attn_fn(block_in, head_size, using_sa=using_mid_sa)
+        self.mid.attn_1 = self.attn_fn(in_channels=block_in, head_size=head_size, using_sa=True)
         self.mid.block_2 = ResnetBlock(in_channels=block_in, out_channels=block_in, dropout=dropout)
 
         # end
@@ -277,7 +277,7 @@ class Decoder(nn.Module):
         # middle
         self.mid = nn.Module()
         self.mid.block_1 = ResnetBlock(in_channels=block_in, out_channels=block_in, dropout=dropout)
-        self.mid.attn_1 = self.attn_fn(block_in, head_size, using_sa=using_mid_sa)
+        self.mid.attn_1 = self.attn_fn(in_channels=block_in, head_size=head_size, using_sa=using_mid_sa)
         self.mid.block_2 = ResnetBlock(in_channels=block_in, out_channels=block_in, dropout=dropout)
 
         # upsampling
@@ -291,7 +291,7 @@ class Decoder(nn.Module):
                 block.append(ResnetBlock(in_channels=block_in, out_channels=block_out, dropout=dropout))
                 block_in = block_out
                 if i_level == self.num_resolutions - 1 and using_sa:
-                    attn.append(self.attn_fn(block_in, head_size, using_sa=True))
+                    attn.append(self.attn_fn(in_channels=block_in, head_size=head_size, using_sa=True))
             up = nn.Module()
             up.block = block
             up.attn = attn
