@@ -26,13 +26,14 @@ BTen = torch.BoolTensor
 class VAETrainer(object):
     def __init__(
         self, is_visualizer: bool,
-        vae: DDP, vae_wo_ddp: VQVAE, disc: DDP, disc_wo_ddp: DinoDisc, ema_ratio: float,  # decoder, en_de_lin=True, seg_embed=False,
+        vae_local: VQVAE, vae: DDP, vae_wo_ddp: VQVAE, disc: DDP, disc_wo_ddp: DinoDisc, ema_ratio: float,  # decoder, en_de_lin=True, seg_embed=False,
         dcrit: str, vae_opt: AmpOptimizer, disc_opt: AmpOptimizer,
         daug=1.0, lpips_loss: LPIPS = None, lp_reso=64, wei_l1=1.0, wei_l2=0.0, wei_entropy=0.0, wei_lpips=0.5, wei_disc=0.6, adapt_type=1, bcr=5.0, bcr_cut=0.5, reg=0.0, reg_every=16,
         disc_grad_ckpt=False,
     ):
         super(VAETrainer, self).__init__()
 
+        self.vae_local = vae_local
         self.vae, self.disc = vae, disc
         self.vae_opt, self.disc_opt = vae_opt, disc_opt
         self.vae_wo_ddp: VQVAE = vae_wo_ddp  # after torch.compile
@@ -82,12 +83,16 @@ class VAETrainer(object):
         if warmup_disc_schedule < 1e-6: warmup_disc_schedule = 0
         if fade_blur_schedule < 1e-6: fade_blur_schedule = 0
         loggable = (g_it == 0 or (g_it + 1) % 600 == 0) and self.is_visualizer
-        
+
+        # hq infos
+        quant_feat, gt_idx_Bl = self.vae_local.img_to_all(hq)
+        gt_BL = torch.cat(gt_idx_Bl, dim=1)
+
         # [vae loss]
         with maybe_record_function('VAE_rec'):
             with self.vae_opt.amp_ctx:
                 self.vae_wo_ddp.forward
-                rec_B3HW, Lq, usage = self.vae(lq, ret_usages=loggable)
+                f, rec_B3HW, logits = self.vae(lq)
                 B = rec_B3HW.shape[0]
                 inp_rec_no_grad = torch.cat((hq, rec_B3HW.data), dim=0)
             
@@ -111,7 +116,11 @@ class VAETrainer(object):
             else:
                 Lpip = torch.tensor(0.)
                 Lnll = Lrec
-        
+
+        with maybe_record_function('VAE_bfr'):
+            Lcode = torch.mean((quant_feat.detach()-f)**2)
+            Lidx = F.cross_entropy(logits.permute(0, 2, 1), gt_BL)
+
         if warmup_disc_schedule > 0:
             with maybe_record_function('VAE_disc'):
                 for d in self.disc_params: d.requires_grad = False
@@ -147,10 +156,10 @@ class VAETrainer(object):
                     wei_g = wei_g * w
                 
                 # Lv = Lnll + Lq + self.wei_entropy * Le + wei_g * Lg
-                Lv = Lnll + Lq + wei_g * Lg
+                Lv = Lnll + wei_g * Lg + Lidx * 0.5 + Lcode * 1.0
         else:
             # Lv = Lnll + Lq + self.wei_entropy * Le
-            Lv = Lnll + Lq
+            Lv = Lnll + Lidx * 0.5 + Lcode * 1.0
             Lg = torch.tensor(0.)
             wei_g = None
         
@@ -218,12 +227,12 @@ class VAETrainer(object):
             if it == 0 or it in metric_lg.log_iters:
                 Lpip = Lpip.item()
                 Lnll = Lrec_for_log + Lpip
-                metric_lg.update(L1=Lrec_for_log, NLL=Lnll, Ld=Ld, Wg=wei_g, acc_real=acc_real, acc_fake=acc_fake, gnm=grad_norm_g, dnm=grad_norm_d)
+                metric_lg.update(L1=Lrec_for_log, NLL=Lnll, Ld=Ld, Lcode=Lcode, Lidx=Lidx, Wg=wei_g, acc_real=acc_real, acc_fake=acc_fake, gnm=grad_norm_g, dnm=grad_norm_d)
             
             # [tensorboard logging]
             if loggable:
                 # Lbcr, Lq, Le, Lg = Lbcr.item(), Lq.item(), Le if isinstance(Le, (int, float)) else Le.item(), Lg.item()
-                Lbcr, Lq, Lg = Lbcr.item(), Lq.item(), Lg.item()
+                Lbcr, Lcode, Lidx, Lg = Lbcr.item(), Lcode.item(), Lidx.item(), Lg.item()
 
                 # vae_vocab_size = self.vae_wo_ddp.vocab_size
                 # prob_per_class_is_chosen = idx_N.bincount()
@@ -232,10 +241,9 @@ class VAETrainer(object):
                 # cluster_usage = (prob_per_class_is_chosen > 0.05 / vae_vocab_size).float().mean() * 100
                 kw = dict(
                     # total=Lnll + Lq + self.wei_disc * Lg,
-                    Nll=Lnll, RecL1=Lrec_for_log, quant=Lq,
+                    Nll=Lnll, RecL1=Lrec_for_log, Codebook=Lcode, Index=Lidx,
                     # z_log_perplex=log_perplexity, z_voc_usage=cluster_usage
                 )
-                kw[f'z_voc_usage'] = usage
                 # if Le > 1e-6: kw['entropy'] = Le
                 if Lpip > 1e-6: kw['Lpip'] = Lpip
                 tb_lg.update(head='PT_iter_V_loss', step=g_it, **kw)

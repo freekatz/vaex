@@ -5,6 +5,7 @@ from typing import Tuple
 import torch.nn as nn
 
 from utils.arg_util import Args
+from .bfr import BFR
 from .quant import VectorQuantizer2
 from .vqvae import VQVAE
 from .dino import DinoDisc
@@ -14,7 +15,7 @@ from .basic_vae import Encoder, Decoder
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../'))
 
 
-def build_vae_disc(args: Args) -> Tuple[VQVAE, DinoDisc]:
+def build_vae_disc(args: Args) -> Tuple[VQVAE, BFR, DinoDisc]:
     # disable built-in initialization for speed
     for clz in (
         nn.Linear, nn.Embedding,
@@ -24,10 +25,17 @@ def build_vae_disc(args: Args) -> Tuple[VQVAE, DinoDisc]:
         setattr(clz, 'reset_parameters', lambda self: None)
     
     # build models
-    vae = VQVAE(vocab_size=args.vocab_size, z_channels=args.vocab_width, ch=args.ch,
+    vae_local = VQVAE(vocab_size=args.vocab_size, z_channels=args.vocab_width, ch=args.ch,
                 using_znorm=args.vocab_norm, beta=args.vq_beta, dropout=args.drop_out,
                 share_quant_resi=4, quant_conv_ks=3, quant_resi=0.5,
-                v_patch_nums=args.patch_nums, head_size=1, test_mode=False).to(args.device)
+                v_patch_nums=args.patch_nums, head_size=0,
+                quant_fix_modules=[], quat_use_predict=False, test_mode=True).to(args.device)
+    vae = BFR(vqvae_local=vae_local,
+                vocab_size=args.vocab_size, z_channels=args.vocab_width, ch=args.ch,
+                using_znorm=args.vocab_norm, beta=args.vq_beta, dropout=args.drop_out,
+                share_quant_resi=4, quant_conv_ks=3, quant_resi=0.5,
+                v_patch_nums=args.patch_nums, head_size=0, fix_modules=['decoder', 'post_quant_conv'],
+                quant_fix_modules=['quant_resi', 'embedding'], quat_use_predict=True, test_mode=False).to(args.device)
     disc = DinoDisc(
         device=args.device, dino_ckpt_path=args.dino_path, depth=args.dino_depth, key_depths=(2, 5, 8, 11),
         ks=args.dino_kernel_size, norm_type=args.disc_norm, using_spec_norm=args.disc_spec_norm, norm_eps=1e-6,
@@ -47,7 +55,7 @@ def build_vae_disc(args: Args) -> Tuple[VQVAE, DinoDisc]:
     init_weights(disc, args.disc_init)
     vae.quantize.eini(args.vocab_init)
     
-    return vae, disc
+    return vae_local, vae, disc
 
 
 def init_weights(model, conv_std_or_gain):

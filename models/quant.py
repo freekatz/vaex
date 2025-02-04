@@ -18,13 +18,14 @@ class VectorQuantizer2(nn.Module):
     def __init__(
             self, vocab_size, Cvae, using_znorm, beta: float = 0.25,
             default_qresi_counts=0, v_patch_nums=None, quant_resi=0.5, share_quant_resi=4,  # share_quant_resi: args.qsr
-            fix_modules=[],
+            fix_modules=[], use_predict=False
     ):
         super().__init__()
         self.vocab_size: int = vocab_size
         self.Cvae: int = Cvae
         self.using_znorm: bool = using_znorm
         self.v_patch_nums: Tuple[int] = v_patch_nums
+        self.use_predict: bool = use_predict
 
         self.quant_resi_ratio = quant_resi
         if share_quant_resi == 0:  # non-shared: \phi_{1 to K} for K scales
@@ -44,16 +45,17 @@ class VectorQuantizer2(nn.Module):
         self.beta: float = beta
         self.embedding = nn.Embedding(self.vocab_size, self.Cvae)
 
-        embed_dim = 512
-        feat2index = []
-        for _ in self.v_patch_nums:
-            feat2index.append(nn.Sequential(
-                nn.Linear(self.Cvae, embed_dim),
-                nn.BatchNorm1d(embed_dim),
-                nn.GELU(),
-                nn.Linear(embed_dim, self.vocab_size),
-            ))
-        self.feat2index = nn.ModuleList(feat2index)
+        if self.use_predict:
+            embed_dim = 512
+            feat2index = []
+            for _ in self.v_patch_nums:
+                feat2index.append(nn.Sequential(
+                    nn.Linear(self.Cvae, embed_dim),
+                    nn.BatchNorm1d(embed_dim),
+                    nn.GELU(),
+                    nn.Linear(embed_dim, self.vocab_size),
+                ))
+            self.feat2index = nn.ModuleList(feat2index)
 
                                                                # only used for progressive training of VAR (not supported yet, will be tested and supported in the future)
         self.prog_si = -1  # progressive training: not supported yet, prog_si always -1
@@ -175,16 +177,15 @@ class VectorQuantizer2(nn.Module):
 
         return ls_f_hat_BChw
 
-    def f_to_idxBl_or_fhat(self, f_BChw: torch.Tensor, to_fhat: bool, predict=False,
-                           v_patch_nums: Optional[Sequence[Union[int, Tuple[int, int]]]] = None) -> List[
-        Union[torch.Tensor, torch.LongTensor]]:  # z_BChw is the feature from inp_img_no_grad
+    def f_to_logits_and_fhat(self, f_BChw: torch.Tensor, to_fhat: bool, predict=False,
+                           v_patch_nums: Optional[Sequence[Union[int, Tuple[int, int]]]] = None):  # z_BChw is the feature from inp_img_no_grad
         B, C, H, W = f_BChw.shape
         f_no_grad = f_BChw.detach()
         f_rest = f_no_grad.clone()
         f_hat = torch.zeros_like(f_rest)
 
         f_hat_or_idx_Bl: List[torch.Tensor] = []
-
+        logits = []
         patch_hws = [(pn, pn) if isinstance(pn, int) else (pn[0], pn[1]) for pn in
                      (v_patch_nums or self.v_patch_nums)]  # from small to large
         assert patch_hws[-1][0] == H and patch_hws[-1][1] == W, f'{patch_hws[-1]=} != ({H=}, {W=})'
@@ -194,7 +195,97 @@ class VectorQuantizer2(nn.Module):
             if 0 <= self.prog_si < si: break  # progressive training: not supported yet, prog_si always -1
             z_NC = F.interpolate(f_rest, size=(ph, pw), mode='area').permute(0, 2, 3, 1).reshape(-1, C) if (
                     si != SN - 1) else f_rest.permute(0, 2, 3, 1).reshape(-1, C)
-            if predict:
+            if self.use_predict and predict:
+                logits_NV = self.feat2index[si](z_NC)
+                logits.append(logits_NV.view(B, -1, self.vocab_size))
+                idx_N = torch.argmax(logits_NV, dim=-1)
+            else:
+                # find the nearest embedding
+                if self.using_znorm:
+                    z_NC = F.normalize(z_NC, dim=-1)
+                    idx_N = torch.argmax(z_NC @ F.normalize(self.embedding.weight.data.T, dim=0), dim=1)
+                else:
+                    d_no_grad = torch.sum(z_NC.square(), dim=1, keepdim=True) + torch.sum(
+                        self.embedding.weight.data.square(), dim=1, keepdim=False)
+                    d_no_grad.addmm_(z_NC, self.embedding.weight.data.T, alpha=-2, beta=1)  # (B*h*w, vocab_size)
+                    idx_N = torch.argmin(d_no_grad, dim=1)
+            idx_Bhw = idx_N.view(B, ph, pw)
+            if si != SN - 1:
+                h_BChw = F.interpolate(self.embedding(idx_Bhw).permute(0, 3, 1, 2), size=(H, W),
+                                       mode='bicubic').contiguous()
+            else:
+                h_BChw = self.embedding(idx_Bhw).permute(0, 3, 1, 2).contiguous()
+            h_BChw = self.quant_resi[si / (SN - 1)](h_BChw)
+            f_hat.add_(h_BChw)
+            f_rest.sub_(h_BChw)
+            f_hat_or_idx_Bl.append(f_hat.clone() if to_fhat else idx_N.reshape(B, ph * pw))
+
+        return f_hat_or_idx_Bl, logits
+
+    def f_to_idxBl_and_fhat(self, f_BChw: torch.Tensor, to_fhat: bool, predict=False,
+                           v_patch_nums: Optional[Sequence[Union[int, Tuple[int, int]]]] = None):  # z_BChw is the feature from inp_img_no_grad
+        B, C, H, W = f_BChw.shape
+        f_no_grad = f_BChw.detach()
+        f_rest = f_no_grad.clone()
+        f_hat = torch.zeros_like(f_rest)
+
+        f_hat_list: List[torch.Tensor] = []
+        idx_list = []
+        patch_hws = [(pn, pn) if isinstance(pn, int) else (pn[0], pn[1]) for pn in
+                     (v_patch_nums or self.v_patch_nums)]  # from small to large
+        assert patch_hws[-1][0] == H and patch_hws[-1][1] == W, f'{patch_hws[-1]=} != ({H=}, {W=})'
+
+        SN = len(patch_hws)
+        for si, (ph, pw) in enumerate(patch_hws):  # from small to large
+            if 0 <= self.prog_si < si: break  # progressive training: not supported yet, prog_si always -1
+            z_NC = F.interpolate(f_rest, size=(ph, pw), mode='area').permute(0, 2, 3, 1).reshape(-1, C) if (
+                    si != SN - 1) else f_rest.permute(0, 2, 3, 1).reshape(-1, C)
+            if self.use_predict and predict:
+                logits_NV = self.feat2index[si](z_NC)
+                idx_N = torch.argmax(logits_NV, dim=-1)
+            else:
+                # find the nearest embedding
+                if self.using_znorm:
+                    z_NC = F.normalize(z_NC, dim=-1)
+                    idx_N = torch.argmax(z_NC @ F.normalize(self.embedding.weight.data.T, dim=0), dim=1)
+                else:
+                    d_no_grad = torch.sum(z_NC.square(), dim=1, keepdim=True) + torch.sum(
+                        self.embedding.weight.data.square(), dim=1, keepdim=False)
+                    d_no_grad.addmm_(z_NC, self.embedding.weight.data.T, alpha=-2, beta=1)  # (B*h*w, vocab_size)
+                    idx_N = torch.argmin(d_no_grad, dim=1)
+            idx_Bhw = idx_N.view(B, ph, pw)
+            idx_list.append(idx_N.reshape(B, ph * pw))
+            if si != SN - 1:
+                h_BChw = F.interpolate(self.embedding(idx_Bhw).permute(0, 3, 1, 2), size=(H, W),
+                                       mode='bicubic').contiguous()
+            else:
+                h_BChw = self.embedding(idx_Bhw).permute(0, 3, 1, 2).contiguous()
+            h_BChw = self.quant_resi[si / (SN - 1)](h_BChw)
+            f_hat.add_(h_BChw)
+            f_rest.sub_(h_BChw)
+            f_hat_list.append(f_hat.clone())
+
+        return f_hat, idx_list
+
+    def f_to_idxBl_or_fhat(self, f_BChw: torch.Tensor, to_fhat: bool, predict=False,
+                           v_patch_nums: Optional[Sequence[Union[int, Tuple[int, int]]]] = None) -> List[
+        Union[torch.Tensor, torch.LongTensor]]:  # z_BChw is the feature from inp_img_no_grad
+        B, C, H, W = f_BChw.shape
+        f_no_grad = f_BChw.detach()
+        f_rest = f_no_grad.clone()
+        f_hat = torch.zeros_like(f_rest)
+
+        f_hat_or_idx_Bl: List[torch.Tensor] = []
+        patch_hws = [(pn, pn) if isinstance(pn, int) else (pn[0], pn[1]) for pn in
+                     (v_patch_nums or self.v_patch_nums)]  # from small to large
+        assert patch_hws[-1][0] == H and patch_hws[-1][1] == W, f'{patch_hws[-1]=} != ({H=}, {W=})'
+
+        SN = len(patch_hws)
+        for si, (ph, pw) in enumerate(patch_hws):  # from small to large
+            if 0 <= self.prog_si < si: break  # progressive training: not supported yet, prog_si always -1
+            z_NC = F.interpolate(f_rest, size=(ph, pw), mode='area').permute(0, 2, 3, 1).reshape(-1, C) if (
+                    si != SN - 1) else f_rest.permute(0, 2, 3, 1).reshape(-1, C)
+            if self.use_predict and predict:
                 logits_NV = self.feat2index[si](z_NC)
                 idx_N = torch.argmax(logits_NV, dim=-1)
             else:
@@ -307,9 +398,16 @@ if __name__ == '__main__':
         vocab_size=4096,
         Cvae=32,
         using_znorm=False,
-        v_patch_nums=(1, 2, 3, 4, 5, 6, 8, 10, 13, 16)
+        v_patch_nums=(1, 2, 3, 4, 5, 6, 8, 10, 13, 16),
+        use_predict=True,
     )
     h = torch.randn(2, 32, 16, 16)
-    f_hat_list = vq.f_to_idxBl_or_fhat(h, to_fhat=True, predict=True)
-    for f_hat in f_hat_list:
-        print(f_hat.shape)
+    f_hat_list, logits_list = vq.f_to_logits_and_fhat(h, to_fhat=True, predict=True)
+    print(len(f_hat_list), len(logits_list))
+    for f_hat, logits in zip(f_hat_list, logits_list):
+        print(f_hat.shape, logits.shape)
+
+    f_hat, idx_list = vq.f_to_idxBl_and_fhat(h, to_fhat=True, predict=False)
+    print(f_hat.shape, len(idx_list))
+    for idx in idx_list:
+        print(idx.shape)

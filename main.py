@@ -45,7 +45,9 @@ def build_model(args: arg_util.Args):
     from models import build_vae_disc, VQVAE, DinoDisc
 
     # build models
-    vae_wo_ddp, disc_wo_ddp = build_vae_disc(args)
+    vae_local, vae_wo_ddp, disc_wo_ddp = build_vae_disc(args)
+    vae_local.load_state_dict(torch.load(args.vae_path, map_location='cpu'), strict=True, compat=False)
+    vae_local: VQVAE
     vae_wo_ddp: VQVAE
     disc_wo_ddp: DinoDisc
 
@@ -67,7 +69,7 @@ def build_model(args: arg_util.Args):
         # ('fpn_conv', disc_wo_ddp.ls_fpn_conv), ('head', disc_wo_ddp.ls_head), ('down', disc_wo_ddp.ls_down),
         # ('glb_cls', disc_wo_ddp.glb_cls),
     )]) + '\n\n')
-    return vae_wo_ddp, disc_wo_ddp
+    return vae_local, vae_wo_ddp, disc_wo_ddp
 
 
 def build_optimizer(args: arg_util.Args, vae_wo_ddp, disc_wo_ddp):
@@ -193,7 +195,7 @@ def build_things_from_args(args: arg_util.Args):
     print(f'[dataloader] gbs={args.bs}, lbs={args.lbs}, iters_train={iters_train}')
 
     # build model
-    vae_wo_ddp, disc_wo_ddp = build_model(args)
+    vae_local, vae_wo_ddp, disc_wo_ddp = build_model(args)
 
     model_size, trainable_model_size = cal_model_params(vae_wo_ddp)
     print('Number of vae params: %.4f M' % (model_size / 1e6))
@@ -211,6 +213,7 @@ def build_things_from_args(args: arg_util.Args):
     from torch.nn.parallel import DistributedDataParallel as DDP
     from utils.trainer import VAETrainer
     from utils.lpips import LPIPS
+    vae_local = args.compile_model(vae_local, args.compile_vae)
     vae_wo_ddp, disc_wo_ddp = args.compile_model(vae_wo_ddp, args.compile_vae), args.compile_model(disc_wo_ddp, args.compile_disc)
     lpips_loss: LPIPS = args.compile_model(LPIPS(args.lpips_path).to(args.device), fast=args.compile_lpips)
     
@@ -224,14 +227,14 @@ def build_things_from_args(args: arg_util.Args):
     
     trainer = VAETrainer(
         is_visualizer=dist_utils.is_master(),
-        vae=vae, vae_wo_ddp=vae_wo_ddp, disc=disc, disc_wo_ddp=disc_wo_ddp, ema_ratio=args.ema,
+        vae_local=vae_local, vae=vae, vae_wo_ddp=vae_wo_ddp, disc=disc, disc_wo_ddp=disc_wo_ddp, ema_ratio=args.ema,
         dcrit=args.dcrit, vae_opt=vae_optim, disc_opt=disc_optim,
         daug=args.disc_aug_prob, lpips_loss=lpips_loss, lp_reso=args.lpr, wei_l1=args.l1, wei_l2=args.l2, wei_entropy=args.le, wei_lpips=args.lp, wei_disc=args.ld, adapt_type=args.gada, bcr=args.bcr, bcr_cut=args.bcr_cut, reg=args.reg, reg_every=args.reg_every,
         disc_grad_ckpt=args.disc_grad_ckpt,
     )
     if trainer_state is not None and len(trainer_state):
         trainer.load_state_dict(trainer_state, strict=True)
-    del vae, vae_wo_ddp, disc, disc_wo_ddp, vae_optim, disc_optim
+    del vae_local, vae, vae_wo_ddp, disc, disc_wo_ddp, vae_optim, disc_optim
 
     return (
         tb_lg, trainer,
@@ -250,7 +253,7 @@ def train_one_ep(ep: int, is_first_ep: bool, start_it: int, args: arg_util.Args,
     me = misc.MetricLogger(delimiter='  ')
     [me.add_meter(x, misc.SmoothedValue(window_size=1, fmt='{value:.2g}')) for x in ['glr', 'dlr']]
     [me.add_meter(x, misc.SmoothedValue(window_size=1, fmt='{median:.2f} ({global_avg:.2f})')) for x in ['gnm', 'dnm']]
-    for l in ['L1', 'NLL', 'Ld', 'Wg']:
+    for l in ['L1', 'NLL', 'Ld', 'Lcode', 'Lidx', 'Wg']:
         me.add_meter(l, misc.SmoothedValue(fmt='{median:.3f} ({global_avg:.3f})'))
     header = f'[Ep]: [{ep:4d}/{args.ep}]'
     
@@ -454,23 +457,21 @@ def main_training():
                 ep, ep == start_ep, start_it if ep == start_ep else 0, args, tb_lg, ld_train, iters_train, trainer, logging_params_milestone
             )
         
-        Lnll, L1, Ld, wei_g = stats['NLL'], stats['L1'], stats['Ld'], stats['Wg']
+        Lnll, L1, Ld, Lcode, Lidx, wei_g = stats['NLL'], stats['L1'], stats['Ld'], stats['Lcode'], stats['Lidx'], stats['Wg']
         # min_Lnll, min_Ld = min(min_Lnll, Lnll), min(min_Ld, min_Ld if Ld < 1e-7 else Ld)
-        best_updated_nll = False
+        best_updated = False
         if Lnll < min_Lnll and Lnll != 0:
-            best_updated_nll = True
+            best_updated = True
             min_Lnll = Lnll
-        best_updated_d = False
         if Ld < min_Ld and Ld != 0:
             min_Ld = Ld
-            best_updated_d = True
         acc_real, acc_fake = stats.get('acc_real', -1), stats.get('acc_fake', -1)
         acc_all = (acc_real + acc_fake) * 0.5
         args.last_Lnll, args.last_L1, args.last_Ld, args.last_wei_g, args.acc_all, args.acc_real, args.acc_fake = Lnll, L1, Ld, wei_g, acc_all, acc_real, acc_fake
         if not math.isfinite(Lnll + Ld + L1 + wei_g):
             for n, v in zip(
-                    ('Lnll', 'Ld', 'L1', 'wei_g'),
-                    (Lnll, Ld, L1, wei_g),
+                    ('Lnll', 'Ld', 'L1', 'Lcode', 'Lidx', 'wei_g'),
+                    (Lnll, Ld, L1, Lcode, Lidx, wei_g),
             ):
                 if not math.isfinite(v):
                     # noinspection PyArgumentList
@@ -496,9 +497,9 @@ def main_training():
         
         disc_start = acc_all >= 0
         if disc_start:
-            kw = dict(L1rec=L1, Lnll=Lnll, Ld=Ld, wei_g=wei_g, acc_all=acc_all, acc_fake=acc_fake, acc_real=acc_real)
+            kw = dict(L1rec=L1, Lnll=Lnll, Ld=Ld, Lcode=Lcode, Lidx=Lidx, wei_g=wei_g, acc_all=acc_all, acc_fake=acc_fake, acc_real=acc_real)
         else:
-            kw = dict(L1rec=L1, Lnll=Lnll)
+            kw = dict(L1rec=L1, Lnll=Lnll, Lcode=Lcode, Lidx=Lidx)
         tb_lg.update(head='PT_ep_loss', step=ep+1, **kw)
         tb_lg.update(head='PT_z_burnout', step=ep+1, rest_hours=round(sec / 60 / 60, 2))
 
@@ -515,8 +516,7 @@ def main_training():
 
         if dist_utils.is_local_master():
             local_out_ckpt = os.path.join(args.local_out_dir_path, 'ckpt-last.pth')
-            local_out_ckpt_best_nll = os.path.join(args.local_out_dir_path, 'ckpt-best_nll.pth')
-            local_out_ckpt_best_d = os.path.join(args.local_out_dir_path, 'ckpt-best_d.pth')
+            local_out_ckpt_best = os.path.join(args.local_out_dir_path, 'ckpt-best.pth')
             print(f'[saving ckpt] ...', end='', flush=True)
             torch.save({
                 'epoch':    ep+1,
@@ -525,12 +525,9 @@ def main_training():
                 'args':     args.state_dict(),
             }, local_out_ckpt)
             print(f'     [saving ckpt](*) finished!  @ {local_out_ckpt}', flush=True)
-            if best_updated_nll:
-                print(f'[saving ckpt](*) finished!, new best nll {min_Lnll}  @ {local_out_ckpt_best_nll}', flush=True)
-                shutil.copy(local_out_ckpt, local_out_ckpt_best_nll)
-            if best_updated_d:
-                print(f'[saving ckpt](*) finished!, new best d {min_Ld} @ {local_out_ckpt_best_d}', flush=True)
-                shutil.copy(local_out_ckpt, local_out_ckpt_best_d)
+            if best_updated:
+                print(f'[saving ckpt](*) finished!, new best nll {min_Lnll}  @ {local_out_ckpt_best}', flush=True)
+                shutil.copy(local_out_ckpt, local_out_ckpt_best)
         dist_utils.barrier()
     
     total_time = f'{(time.time() - start_time) / 60 / 60:.1f}h'

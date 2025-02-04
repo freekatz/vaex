@@ -32,12 +32,15 @@ class VQVAE(nn.Module):
             default_qresi_counts=0, # if is 0: automatically set to len(v_patch_nums)，残差块的数量
             v_patch_nums=(1, 2, 3, 4, 5, 6, 8, 10, 13, 16), # number of patches for each scale, h_{1 to K} = w_{1 to K} = v_patch_nums[k]，代表每个尺度下的词元图像 h 和 w
             head_size=0,
-            test_mode=True,
+            test_mode=False,
             fix_modules=[],
+            quant_fix_modules=[],
+            quat_use_predict=False,
     ):
         super().__init__()
         self.test_mode = test_mode
         self.V, self.Cvae = vocab_size, z_channels
+        self.head_size = head_size
         # ddconfig is copied from https://github.com/CompVis/latent-diffusion/blob/e66308c7f2e64cb581c6d27ab6fbeb846828253b/models/first_stage_models/vq-f16/config.yaml
         ddconfig = dict(
             dropout=dropout, ch=ch, z_channels=z_channels,
@@ -54,7 +57,7 @@ class VQVAE(nn.Module):
         self.quantize: VectorQuantizer2 = VectorQuantizer2(
             vocab_size=vocab_size, Cvae=self.Cvae, using_znorm=using_znorm, beta=beta,
             default_qresi_counts=default_qresi_counts, v_patch_nums=v_patch_nums, quant_resi=quant_resi, share_quant_resi=share_quant_resi,
-            fix_modules=['quant_resi', 'embedding'],
+            fix_modules=quant_fix_modules, use_predict=quat_use_predict
         )
         self.quant_conv = torch.nn.Conv2d(self.Cvae, self.Cvae, quant_conv_ks, stride=1, padding=quant_conv_ks//2)
         self.post_quant_conv = torch.nn.Conv2d(self.Cvae, self.Cvae, quant_conv_ks, stride=1, padding=quant_conv_ks//2)
@@ -78,23 +81,25 @@ class VQVAE(nn.Module):
     def inference(self, lq):
         hs = self.encoder(lq)
         h = hs['out']
-        f_hat_list = self.quantize.f_to_idxBl_or_fhat(self.quant_conv(h))
+        f_hat_list = self.quantize.f_to_idxBl_or_fhat(self.quant_conv(h), to_fhat=True, predict=False)
         img = self.fhat_to_img(f_hat_list[-1], hs)
         return img
-
-    def inference2(self, lq):
-        hs = self.encoder(lq)
-        h = hs['out']
-        f_hat_list = self.quantize.f_to_idxBl_or_fhat(self.quant_conv(h), to_fhat=True, predict=True)
-        imgs = [self.fhat_to_img(f_hat_list[i], hs) for i in range(len(f_hat_list))]
-        return imgs
 
     def fhat_to_img(self, f_hat: torch.Tensor, hs):
         return self.decoder(self.post_quant_conv(f_hat), hs).clamp_(min=-1, max=1)
 
+    def img_to_all(self, inp_img_no_grad: torch.Tensor, v_patch_nums: Optional[Sequence[Union[int, Tuple[int, int]]]] = None):    # return List[Bl]
+        hs = self.encoder(inp_img_no_grad)
+        h = hs['out']
+        f = self.quant_conv(h)
+        f_hat, idx_list = self.quantize.f_to_idxBl_and_fhat(f, to_fhat=True, v_patch_nums=v_patch_nums, predict=False)
+        return f_hat, idx_list
+
     def img_to_idxBl(self, inp_img_no_grad: torch.Tensor, v_patch_nums: Optional[Sequence[Union[int, Tuple[int, int]]]] = None) -> List[torch.LongTensor]:    # return List[Bl]
-        f = self.quant_conv(self.encoder(inp_img_no_grad))
-        return self.quantize.f_to_idxBl_or_fhat(f, to_fhat=False, v_patch_nums=v_patch_nums)
+        hs = self.encoder(inp_img_no_grad)
+        h = hs['out']
+        f = self.quant_conv(h)
+        return self.quantize.f_to_idxBl_or_fhat(f, to_fhat=False, v_patch_nums=v_patch_nums, predict=False)
 
     def idxBl_to_img(self, ms_idx_Bl: List[torch.Tensor], same_shape: bool, last_one=False) -> Union[List[torch.Tensor], torch.Tensor]:
         B = ms_idx_Bl[0].shape[0]
@@ -123,7 +128,8 @@ class VQVAE(nn.Module):
         print(f'Loading state dict with strict={strict}, assign={assign}, compat={compat}')
         if 'quantize.ema_vocab_hit_SV' in state_dict and state_dict['quantize.ema_vocab_hit_SV'].shape[0] != self.quantize.ema_vocab_hit_SV.shape[0]:
             state_dict['quantize.ema_vocab_hit_SV'] = self.quantize.ema_vocab_hit_SV
-
+        if compat:
+            strict = False
         if compat:
             # compat encoder and decoder
             new_state_dict = OrderedDict()
@@ -216,9 +222,6 @@ class VQVAE(nn.Module):
                     new_state_dict[key] = state_dict.pop(key)
         else:
             new_state_dict = state_dict
-
-        # 	Missing key(s) in state_dict: "decoder.mid.attn_1.norm1.weight", "decoder.mid.attn_1.norm1.bias", "decoder.mid.attn_1.norm2.weight", "decoder.mid.attn_1.norm2.bias", "decoder.mid.attn_1.q.weight", "decoder.mid.attn_1.q.bias", "decoder.mid.attn_1.k.weight", "decoder.mid.attn_1.k.bias", "decoder.mid.attn_1.v.weight", "decoder.mid.attn_1.v.bias", "decoder.up.4.attn.0.norm1.weight", "decoder.up.4.attn.0.norm1.bias", "decoder.up.4.attn.0.norm2.weight", "decoder.up.4.attn.0.norm2.bias", "decoder.up.4.attn.0.q.weight", "decoder.up.4.attn.0.q.bias", "decoder.up.4.attn.0.k.weight", "decoder.up.4.attn.0.k.bias", "decoder.up.4.attn.0.v.weight", "decoder.up.4.attn.0.v.bias", "decoder.up.4.attn.1.norm1.weight", "decoder.up.4.attn.1.norm1.bias", "decoder.up.4.attn.1.norm2.weight", "decoder.up.4.attn.1.norm2.bias", "decoder.up.4.attn.1.q.weight", "decoder.up.4.attn.1.q.bias", "decoder.up.4.attn.1.k.weight", "decoder.up.4.attn.1.k.bias", "decoder.up.4.attn.1.v.weight", "decoder.up.4.attn.1.v.bias", "decoder.up.4.attn.2.norm1.weight", "decoder.up.4.attn.2.norm1.bias", "decoder.up.4.attn.2.norm2.weight", "decoder.up.4.attn.2.norm2.bias", "decoder.up.4.attn.2.q.weight", "decoder.up.4.attn.2.q.bias", "decoder.up.4.attn.2.k.weight", "decoder.up.4.attn.2.k.bias", "decoder.up.4.attn.2.v.weight", "decoder.up.4.attn.2.v.bias".
-        # 	Unexpected key(s) in state_dict: "decoder.mid.attn_1.norm.weight", "decoder.mid.attn_1.norm.bias", "decoder.mid.attn_1.qkv.weight", "decoder.mid.attn_1.qkv.bias", "decoder.up.4.attn.0.norm.weight", "decoder.up.4.attn.0.norm.bias", "decoder.up.4.attn.0.qkv.weight", "decoder.up.4.attn.0.qkv.bias", "decoder.up.4.attn.1.norm.weight", "decoder.up.4.attn.1.norm.bias", "decoder.up.4.attn.1.qkv.weight", "decoder.up.4.attn.1.qkv.bias", "decoder.up.4.attn.2.norm.weight", "decoder.up.4.attn.2.norm.bias", "decoder.up.4.attn.2.qkv.weight", "decoder.up.4.attn.2.qkv.bias".
         return super().load_state_dict(state_dict=new_state_dict, strict=False, assign=assign)
 
 
@@ -280,18 +283,16 @@ if __name__ == '__main__':
     B, C, H, W = 4, 3, 256, 256
     vae = VQVAE(vocab_size=4096, z_channels=32, ch=160, test_mode=True,
                 share_quant_resi=4, v_patch_nums=(1, 2, 3, 4, 5, 6, 8, 10, 13, 16),
-                head_size=1,
+                head_size=0, quant_fix_modules=[], quat_use_predict=False,
                 ).to(device)
     vae.eval()
 
     # trainer
-    # vae_ckpt = '/Users/katz/Downloads/vae_ch160v4096z32.pth'
+    vae_ckpt = '/Users/katz/Downloads/vae_ch160v4096z32.pth'
     state_dict = torch.load(vae_ckpt, map_location='cpu')
     if 'trainer' in state_dict.keys():
         state_dict = state_dict['trainer']['vae_ema']
-    vae.load_state_dict(state_dict, strict=False, compat=False)
-    # vae.load_state_dict(torch.load(vae_ckpt, map_location='cpu'), strict=False, compat=True)
-    # torch.save(vae.state_dict(), '/Users/katz/Downloads/pt_vae_ch160v4096z32_new2.pth')
+    vae.load_state_dict(state_dict, strict=True, compat=False)
 
     from utils.dataset.ffhq_blind import FFHQBlind
     import torchvision
@@ -334,42 +335,11 @@ if __name__ == '__main__':
         chw = torchvision.utils.make_grid(img, nrow=len(res), padding=0, pad_value=1.0)
         chw = chw.permute(1, 2, 0).mul_(255).cpu().numpy()
         chw = PImage.fromarray(chw.astype(np.uint8))
-        filename = f'dataset{i}-{args.out}.png'
-        chw.save(os.path.join(root, filename))
-        print(f'Saved {filename}...')
-
-    def inference2(i, ds: data.Dataset):
-        lq_in_list = []
-        hq_in_list = []
-        for idx in range(len(ds)):
-            if idx > 20:
-                break
-            res = ds[idx]
-            lq, hq = res['lq'], res['gt']
-            lq_in_list.append(lq)
-            hq_in_list.append(hq)
-        lq = torch.stack(lq_in_list, dim=0)
-        hq = torch.stack(hq_in_list, dim=0)
-        print(i, lq.shape, hq.shape)
-
-        lq_res2 = vae.inference2(lq)
-        res = [hq, lq]
-        res.extend(lq_res2)
-        res_img = torch.stack(res, dim=1)
-        res_img = torch.reshape(res_img, (-1, 3, 256, 256))
-        img = denormalize_pm1_into_01(res_img)
-        chw = torchvision.utils.make_grid(img, nrow=len(res), padding=0, pad_value=1.0)
-        chw = chw.permute(1, 2, 0).mul_(255).cpu().numpy()
-        chw = PImage.fromarray(chw.astype(np.uint8))
-        filename = f'dataset{i}-{args.out}-2.png'
+        filename = f'dataset{i}-{args.out}-vqvae.png'
         chw.save(os.path.join(root, filename))
         print(f'Saved {filename}...')
 
 
     for i in range(4):
         ds = FFHQBlind(root=f'{args.data}{i+1}', split='train', opt=opt)
-        if args.mode == 0:
-            inference(i + 1, ds)
-        elif args.mode == 1:
-            if i == 0:
-                inference2(i + 1, ds)
+        inference(i + 1, ds)

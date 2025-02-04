@@ -29,6 +29,7 @@ class Args(Tap):
     bed: str = 'exp'           # Experiment Directory
     resume: str = ''            # if specified, load this checkpoint; if not, load the latest checkpoint in bed (if existing)
     pretrain: str = ''
+    vae_path: str
     lpips_path: str        # lpips VGG model weights
     dino_path: str         # vit_small_patch16_224.pth model weights
     face_path: str = ''

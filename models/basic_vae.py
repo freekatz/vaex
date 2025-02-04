@@ -71,7 +71,7 @@ class AttnBlock(nn.Module):
         self.w_ratio = int(in_channels) ** (-0.5)
         self.proj_out = torch.nn.Conv2d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         qkv = self.qkv(self.norm(x))
         B, _, H, W = qkv.shape  # should be B,3C,H,W
         C = self.C
@@ -192,6 +192,7 @@ class Encoder(nn.Module):
         self.num_res_blocks = num_res_blocks
         self.in_channels = in_channels
         self.attn_fn = make_attn if head_size == 0 else make_multi_cross_attn
+        self.head_size = head_size
 
         # downsampling
         self.conv_in = torch.nn.Conv2d(in_channels, self.ch, kernel_size=3, stride=1, padding=1)
@@ -227,30 +228,36 @@ class Encoder(nn.Module):
         self.conv_out = torch.nn.Conv2d(block_in, (2 * z_channels if double_z else z_channels), kernel_size=3, stride=1,
                                         padding=1)
 
+    def store_info(self, hs, k, v):
+        if self.head_size == 0 and k != 'out':
+            return
+        hs[k] = v
+        return hs
+
     def forward(self, x):
         # downsampling
         h = self.conv_in(x)
         hs = {}
-        hs['in'] = h
+        self.store_info(hs, 'in', h)
         for i_level in range(self.num_resolutions):
             for i_block in range(self.num_res_blocks):
                 h = self.down[i_level].block[i_block](h)
                 if len(self.down[i_level].attn) > 0:
                     h = self.down[i_level].attn[i_block](h)
             if i_level != self.num_resolutions - 1:
-                hs['block_' + str(i_level)] = h
+                self.store_info(hs, 'block_' + str(i_level), h)
                 h = self.down[i_level].downsample(h)
 
         # middle
         h = self.mid.block_1(h)
-        hs['block_' + str(self.num_resolutions-1) + '_attn'] = h
+        self.store_info(hs, 'block_' + str(self.num_resolutions-1) + '_attn', h)
         h = self.mid.attn_1(h)
         h = self.mid.block_2(h)
-        hs['mid_attn'] = h
+        self.store_info(hs, 'mid_attn', h)
 
         # end
         h = self.conv_out(F.silu(self.norm_out(h), inplace=True))
-        hs['out'] = h
+        self.store_info(hs, 'out', h)
         return hs
 
 
@@ -266,6 +273,7 @@ class Decoder(nn.Module):
         self.num_res_blocks = num_res_blocks
         self.in_channels = in_channels
         self.attn_fn = make_attn if head_size == 0 else make_multi_cross_attn
+        self.head_size = head_size
 
         # compute in_ch_mult, block_in and curr_res at lowest res
         in_ch_mult = (1,) + tuple(ch_mult)
@@ -303,23 +311,28 @@ class Decoder(nn.Module):
         self.norm_out = Normalize(block_in)
         self.conv_out = torch.nn.Conv2d(block_in, in_channels, kernel_size=3, stride=1, padding=1)
 
+    def load_info(self, hs, k):
+        if self.head_size == 0:
+            return None
+        return hs[k]
+
     def forward(self, z, hs):
         # z to block_in
         # middle
-        enc_feat = hs['mid_attn']
+        enc_feat = self.load_info(hs, 'mid_attn')
         dec_feat = self.mid.block_1(self.conv_in(z))
-        h = self.mid.block_2(self.mid.attn_1(dec_feat, enc_feat))
+        h = self.mid.block_2(self.mid.attn_1(dec_feat, q=enc_feat))
 
         # upsampling
         for i_level in reversed(range(self.num_resolutions)):
             for i_block in range(self.num_res_blocks + 1):
                 h = self.up[i_level].block[i_block](h)
                 if len(self.up[i_level].attn) > 0:
-                    if 'block_' + str(i_level) + '_attn' in hs:
-                        enc_feat = hs['block_' + str(i_level) + '_attn']
+                    if 'block_' + str(i_level) + '_attn' in hs.keys():
+                        enc_feat = self.load_info(hs, 'block_' + str(i_level) + '_attn')
                     else:
-                        enc_feat = hs['block_' + str(i_level)]
-                    h = self.up[i_level].attn[i_block](h, enc_feat)
+                        enc_feat = self.load_info(hs, 'block_' + str(i_level))
+                    h = self.up[i_level].attn[i_block](h, q=enc_feat)
             if i_level != 0:
                 h = self.up[i_level].upsample(h)
 
