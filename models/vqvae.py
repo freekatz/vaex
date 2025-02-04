@@ -54,6 +54,7 @@ class VQVAE(nn.Module):
         self.quantize: VectorQuantizer2 = VectorQuantizer2(
             vocab_size=vocab_size, Cvae=self.Cvae, using_znorm=using_znorm, beta=beta,
             default_qresi_counts=default_qresi_counts, v_patch_nums=v_patch_nums, quant_resi=quant_resi, share_quant_resi=share_quant_resi,
+            fix_modules=['quant_resi', 'embedding'],
         )
         self.quant_conv = torch.nn.Conv2d(self.Cvae, self.Cvae, quant_conv_ks, stride=1, padding=quant_conv_ks//2)
         self.post_quant_conv = torch.nn.Conv2d(self.Cvae, self.Cvae, quant_conv_ks, stride=1, padding=quant_conv_ks//2)
@@ -74,13 +75,19 @@ class VQVAE(nn.Module):
         return self.decoder(self.post_quant_conv(f_hat), hs), vq_loss, usages
     # ===================== `forward` is only used in VAE training =====================
 
-    def inference(self, lq, ret_usages=False):
-        VectorQuantizer2.forward
+    def inference(self, lq):
         hs = self.encoder(lq)
         h = hs['out']
-        f_hat, vq_loss, usages = self.quantize(self.quant_conv(h), ret_usages=ret_usages)
-        img = self.fhat_to_img(f_hat, hs)
-        return img, vq_loss, usages
+        f_hat_list = self.quantize.f_to_idxBl_or_fhat(self.quant_conv(h))
+        img = self.fhat_to_img(f_hat_list[-1], hs)
+        return img
+
+    def inference2(self, lq):
+        hs = self.encoder(lq)
+        h = hs['out']
+        f_hat_list = self.quantize.f_to_idxBl_or_fhat(self.quant_conv(h), to_fhat=True, predict=True)
+        imgs = [self.fhat_to_img(f_hat_list[i], hs) for i in range(len(f_hat_list))]
+        return imgs
 
     def fhat_to_img(self, f_hat: torch.Tensor, hs):
         return self.decoder(self.post_quant_conv(f_hat), hs).clamp_(min=-1, max=1)
@@ -212,7 +219,7 @@ class VQVAE(nn.Module):
 
         # 	Missing key(s) in state_dict: "decoder.mid.attn_1.norm1.weight", "decoder.mid.attn_1.norm1.bias", "decoder.mid.attn_1.norm2.weight", "decoder.mid.attn_1.norm2.bias", "decoder.mid.attn_1.q.weight", "decoder.mid.attn_1.q.bias", "decoder.mid.attn_1.k.weight", "decoder.mid.attn_1.k.bias", "decoder.mid.attn_1.v.weight", "decoder.mid.attn_1.v.bias", "decoder.up.4.attn.0.norm1.weight", "decoder.up.4.attn.0.norm1.bias", "decoder.up.4.attn.0.norm2.weight", "decoder.up.4.attn.0.norm2.bias", "decoder.up.4.attn.0.q.weight", "decoder.up.4.attn.0.q.bias", "decoder.up.4.attn.0.k.weight", "decoder.up.4.attn.0.k.bias", "decoder.up.4.attn.0.v.weight", "decoder.up.4.attn.0.v.bias", "decoder.up.4.attn.1.norm1.weight", "decoder.up.4.attn.1.norm1.bias", "decoder.up.4.attn.1.norm2.weight", "decoder.up.4.attn.1.norm2.bias", "decoder.up.4.attn.1.q.weight", "decoder.up.4.attn.1.q.bias", "decoder.up.4.attn.1.k.weight", "decoder.up.4.attn.1.k.bias", "decoder.up.4.attn.1.v.weight", "decoder.up.4.attn.1.v.bias", "decoder.up.4.attn.2.norm1.weight", "decoder.up.4.attn.2.norm1.bias", "decoder.up.4.attn.2.norm2.weight", "decoder.up.4.attn.2.norm2.bias", "decoder.up.4.attn.2.q.weight", "decoder.up.4.attn.2.q.bias", "decoder.up.4.attn.2.k.weight", "decoder.up.4.attn.2.k.bias", "decoder.up.4.attn.2.v.weight", "decoder.up.4.attn.2.v.bias".
         # 	Unexpected key(s) in state_dict: "decoder.mid.attn_1.norm.weight", "decoder.mid.attn_1.norm.bias", "decoder.mid.attn_1.qkv.weight", "decoder.mid.attn_1.qkv.bias", "decoder.up.4.attn.0.norm.weight", "decoder.up.4.attn.0.norm.bias", "decoder.up.4.attn.0.qkv.weight", "decoder.up.4.attn.0.qkv.bias", "decoder.up.4.attn.1.norm.weight", "decoder.up.4.attn.1.norm.bias", "decoder.up.4.attn.1.qkv.weight", "decoder.up.4.attn.1.qkv.bias", "decoder.up.4.attn.2.norm.weight", "decoder.up.4.attn.2.norm.bias", "decoder.up.4.attn.2.qkv.weight", "decoder.up.4.attn.2.qkv.bias".
-        return super().load_state_dict(state_dict=new_state_dict, strict=strict, assign=assign)
+        return super().load_state_dict(state_dict=new_state_dict, strict=False, assign=assign)
 
 
 if __name__ == '__main__':
@@ -229,6 +236,7 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--mode', type=int, default=0)
     parser.add_argument('--data', type=str, default='')
     parser.add_argument('--ckpt', type=str, default='')
     parser.add_argument('--out', type=str, default='res')
@@ -281,7 +289,7 @@ if __name__ == '__main__':
     state_dict = torch.load(vae_ckpt, map_location='cpu')
     if 'trainer' in state_dict.keys():
         state_dict = state_dict['trainer']['vae_ema']
-    vae.load_state_dict(state_dict, strict=True, compat=False)
+    vae.load_state_dict(state_dict, strict=False, compat=False)
     # vae.load_state_dict(torch.load(vae_ckpt, map_location='cpu'), strict=False, compat=True)
     # torch.save(vae.state_dict(), '/Users/katz/Downloads/pt_vae_ch160v4096z32_new2.pth')
 
@@ -316,13 +324,8 @@ if __name__ == '__main__':
         hq = torch.stack(hq_in_list, dim=0)
         print(i, lq.shape, hq.shape)
 
-        lq_res, vq_loss, usages = vae.inference(lq, ret_usages=True)
-        print(i, vq_loss)
-        print(i, usages)
-
-        hq_res, vq_loss, usages = vae.inference(hq, ret_usages=True)
-        print(i, vq_loss)
-        print(i, usages)
+        lq_res = vae.inference(lq)
+        hq_res = vae.inference(hq)
 
         res = [hq, lq, hq_res, lq_res]
         res_img = torch.stack(res, dim=1)
@@ -335,6 +338,38 @@ if __name__ == '__main__':
         chw.save(os.path.join(root, filename))
         print(f'Saved {filename}...')
 
+    def inference2(i, ds: data.Dataset):
+        lq_in_list = []
+        hq_in_list = []
+        for idx in range(len(ds)):
+            if idx > 20:
+                break
+            res = ds[idx]
+            lq, hq = res['lq'], res['gt']
+            lq_in_list.append(lq)
+            hq_in_list.append(hq)
+        lq = torch.stack(lq_in_list, dim=0)
+        hq = torch.stack(hq_in_list, dim=0)
+        print(i, lq.shape, hq.shape)
+
+        lq_res2 = vae.inference2(lq)
+        res = [hq, lq]
+        res.extend(lq_res2)
+        res_img = torch.stack(res, dim=1)
+        res_img = torch.reshape(res_img, (-1, 3, 256, 256))
+        img = denormalize_pm1_into_01(res_img)
+        chw = torchvision.utils.make_grid(img, nrow=len(res), padding=0, pad_value=1.0)
+        chw = chw.permute(1, 2, 0).mul_(255).cpu().numpy()
+        chw = PImage.fromarray(chw.astype(np.uint8))
+        filename = f'dataset{i}-{args.out}-2.png'
+        chw.save(os.path.join(root, filename))
+        print(f'Saved {filename}...')
+
+
     for i in range(4):
         ds = FFHQBlind(root=f'{args.data}{i+1}', split='train', opt=opt)
-        inference(i+1, ds)
+        if args.mode == 0:
+            inference(i + 1, ds)
+        elif args.mode == 1:
+            if i == 0:
+                inference2(i + 1, ds)
