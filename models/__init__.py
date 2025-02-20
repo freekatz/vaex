@@ -51,7 +51,7 @@ def build_vae_disc(args: Args) -> Tuple[VQVAE, DinoDisc]:
 
 
 def build_var(
-        args=None,
+        device='cpu',
         # Shared args
          patch_nums=(1, 2, 3, 4, 5, 6, 8, 10, 13, 16),  # 10 steps by default
         # VQVAE args
@@ -64,10 +64,6 @@ def build_var(
     heads = depth
     width = depth * 64
     dpr = 0.1 * depth / 24
-    if args is None:
-        device = dist_utils.get_device()
-    else:
-        device = args.device
 
     # build models
     vae_local = VQVAE(vocab_size=V, z_channels=Cvae, ch=ch, test_mode=True, share_quant_resi=share_quant_resi,
@@ -85,8 +81,7 @@ def build_var(
     return var_local
 
 
-def build_vae_var_eval() -> Tuple[VQVAE, VAR]:
-    device = dist_utils.get_device()
+def build_vae_var_eval(device='cpu') -> Tuple[VQVAE, VAR]:
     # build models
     vae = VQVAE(vocab_size=4096, z_channels=32, ch=160,
                 test_mode=True,
@@ -94,7 +89,7 @@ def build_vae_var_eval() -> Tuple[VQVAE, VAR]:
                 v_patch_nums=(1, 2, 3, 4, 5, 6, 8, 10, 13, 16),).to(device)
 
     var = build_var(
-        args=None,
+        device=device,
         V=4096, Cvae=32, ch=160, share_quant_resi=4,  # hard-coded VQVAE hyperparameters
         patch_nums=(1, 2, 3, 4, 5, 6, 8, 10, 13, 16),
         depth=16, shared_aln=False, attn_l2_norm=True,
@@ -126,7 +121,7 @@ def build_vae_disc_var(args: Args) -> Tuple[VQVAE, DinoDisc, VAR]:
     ).to(args.device)
 
     var = build_var(
-        args=args,
+        device=args.device,
         V=4096, Cvae=32, ch=160, share_quant_resi=4,  # hard-coded VQVAE hyperparameters
         patch_nums=(1, 2, 3, 4, 5, 6, 8, 10, 13, 16),
         depth=16, shared_aln=False, attn_l2_norm=True,

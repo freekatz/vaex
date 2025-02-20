@@ -49,13 +49,14 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, required=False, default=random.randint(1, 10000))
     parser.add_argument('--nrow', type=int, required=False, default=0)
     parser.add_argument('--random', action='store_true')
+    parser.add_argument('--cpu', action='store_true')
 
     args = parser.parse_args()
     pprint(args)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    dist_utils.init_distributed_mode(local_out_path=args.out_dir, timeout_minutes=30)
+    device = dist_utils.get_device() if not args.cpu else 'cpu'
 
     seed_everything(args.seed, benchmark=True)
 
@@ -77,7 +78,7 @@ if __name__ == '__main__':
         split=args.split,
     )
     task_type = args.task
-    vqvae, var = build_vae_var_eval()
+    vqvae, var = build_vae_var_eval(device=device)
     vqvae.eval()
     var.eval()
 
@@ -118,11 +119,11 @@ if __name__ == '__main__':
         data: dict
         lq, hq = data['lq'], data['gt']
         if args.random:
-            lq = torch.randn_like(lq ,device=dist_utils.get_device())
+            lq = torch.randn_like(lq ,device=device)
         else:
-            lq = lq.to(dist_utils.get_device(), non_blocking=True)
+            lq = lq.to(device, non_blocking=True)
 
-        hq = hq.to(dist_utils.get_device(), non_blocking=True)
+        hq = hq.to(device, non_blocking=True)
         print(lq.shape, hq.shape)
 
         if task_type == 'var':
