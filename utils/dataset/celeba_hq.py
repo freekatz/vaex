@@ -1,28 +1,30 @@
 import glob
 import os
+import random
 
 import torch.utils.data as data
 
 from utils.dataset.my_transforms import pil_loader
 
 
-class UnlabeledImageFolder(data.Dataset):
+class CelebAHQ(data.Dataset):
     def __init__(self, root, split='train', **kwargs):
         super().__init__()
         self.root = root
+        splits = ['train', 'val']
+        classes = ['male', 'female']
+        all_samples = []
+        for s in splits:
+            for c in classes:
+                sub_samples = glob.glob(os.path.join(self.root, s, c, '*.jpg'))
+                all_samples.extend(sub_samples)
+        random.shuffle(all_samples)
+        print(f'CelebA HQ total samples: {len(all_samples)}')
 
         # load dataset
         split_file = os.path.join(self.root, f'{split}.txt')
-        load_by_name = kwargs.get('load_by_name', True)
-
-        if load_by_name:
-            with open(split_file, 'r') as file:
-                self.samples = [os.path.join(root, line.strip()) for line in file.readlines()]
-        else:
-            all_samples = glob.glob(os.path.join(self.root, '*.*g'))
-            print(f'Folder total samples: {len(all_samples)}')
-            with open(split_file, 'r') as file:
-                self.samples = [all_samples[int(line.strip())] for line in file.readlines()]
+        with open(split_file, 'r') as file:
+            self.samples = [all_samples[int(line.strip())] for line in file.readlines()]
         assert (len(self.samples) > 0)
         self.loader = pil_loader
 

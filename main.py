@@ -19,10 +19,12 @@ import torch
 from torch.autograd.profiler import record_function
 from torch.utils.data import DataLoader
 
+from models import build_vae_disc_var
 from utils import dist_utils
 from utils import arg_util, misc
 from utils.data import build_data_loader
 from utils.dataset.options import DataOptions
+from utils.misc import maybe_pretrain, maybe_resume
 
 
 def build_tensorboard_logger(args: arg_util.Args):
@@ -45,7 +47,7 @@ def build_model(args: arg_util.Args):
     from models import build_vae_disc, VQVAE, DinoDisc
 
     # build models
-    vae_wo_ddp, disc_wo_ddp = build_vae_disc(args)
+    vae_wo_ddp, disc_wo_ddp, var_local = build_vae_disc_var(args)
     vae_wo_ddp: VQVAE
     disc_wo_ddp: DinoDisc
 
@@ -67,7 +69,7 @@ def build_model(args: arg_util.Args):
         # ('fpn_conv', disc_wo_ddp.ls_fpn_conv), ('head', disc_wo_ddp.ls_head), ('down', disc_wo_ddp.ls_down),
         # ('glb_cls', disc_wo_ddp.glb_cls),
     )]) + '\n\n')
-    return vae_wo_ddp, disc_wo_ddp
+    return vae_wo_ddp, disc_wo_ddp, var_local
 
 
 def build_optimizer(args: arg_util.Args, vae_wo_ddp, disc_wo_ddp):
@@ -116,42 +118,6 @@ def build_optimizer(args: arg_util.Args, vae_wo_ddp, disc_wo_ddp):
     return optimizers
 
 
-def maybe_resume(args: arg_util.Args) -> Tuple[List[str], int, int, str, List[Tuple[float, float]], dict, dict]:
-    info = []
-    resume = args.resume
-    if resume is None or resume == '':
-        return info, 0, 0, '[no acc str]', [], {}, {}
-    try:
-        ckpt = torch.load(resume, map_location='cpu')
-    except Exception as e:
-        info.append(f'[auto_resume] failed, {e} @ {resume}')
-        return info, 0, 0, '[no acc str]', [], {}, {}
-    
-    dist_utils.barrier()
-    ep, it = (ckpt['epoch'], ckpt['iter']) if 'iter' in ckpt else (ckpt['epoch'] + 1, 0)
-    eval_milestone = ckpt.get('milestones', [])
-    info.append(f'[auto_resume success] resume from ep{ep}, it{it},    eval_milestone: {eval_milestone}')
-    return info, ep, it, ckpt.get('acc_str', '[no acc str]'), eval_milestone, ckpt['trainer'], ckpt['args']
-
-
-def maybe_pretrain(args: arg_util.Args) -> dict:
-    pretrain = args.pretrain
-    if pretrain is None or pretrain == '':
-        return {}
-    try:
-        ckpt = torch.load(pretrain, map_location='cpu')
-    except Exception as e:
-        print(f'[pretrain] load failed, {e} @ {pretrain}')
-        return {}
-
-    dist_utils.barrier()
-    trainer_state = {
-        'vae_wo_ddp': ckpt,
-    }
-    print(f'[pretrain] load success @ {pretrain}')
-    return trainer_state
-
-
 def cal_model_params(model):
     total = sum([param.nelement() for param in model.parameters()])
     trainable = sum([param.nelement() for param in model.parameters() if param.requires_grad])
@@ -180,11 +146,13 @@ def build_things_from_args(args: arg_util.Args):
 
     # build data
     print(f'[build PT data] ...\n')
-    train_opt = DataOptions.train_options(args)
-    ld_train = build_data_loader(args, start_ep, start_it, dataset=None, dataset_params={'opt': train_opt}, split='train')
+    train_opt = DataOptions.train_options()
+    ld_train = build_data_loader(args, start_ep, start_it, dataset=None,
+                                 dataset_params={'opt': train_opt}, split='train')
+    # val_opt = DataOptions.val_options()
+    # ld_val = build_data_loader(args, start_ep, start_it, dataset=None,
+    #                            dataset_params={'opt': val_opt}, split='val')
 
-    [print(line) for line in auto_resume_info]
-    print(f'[dataloader multi processing] ...', end='', flush=True)
     stt = time.time()
     iters_train = len(ld_train)
     ld_train = iter(ld_train)
@@ -193,7 +161,22 @@ def build_things_from_args(args: arg_util.Args):
     print(f'[dataloader] gbs={args.bs}, lbs={args.lbs}, iters_train={iters_train}')
 
     # build model
-    vae_wo_ddp, disc_wo_ddp = build_model(args)
+    vae_wo_ddp, disc_wo_ddp, var_local = build_model(args)
+
+    if args.var_path != '':
+        var_ckpt = torch.load(args.var_path, map_location='cpu')
+        if 'trainer' in var_ckpt.keys():
+            var_local.load_state_dict(var_ckpt['trainer']['var_local'], strict=True, compat=False)
+        else:
+            missing_keys, unexpected_keys = var_local.load_state_dict(var_ckpt, strict=False, compat=True)
+            print('missing_keys: ', [k for k in missing_keys])
+            print('unexpected_keys: ', [k for k in unexpected_keys])
+        print(f'Loaded var ckpt from {args.var_path}')
+
+    origin_vae_ckpt = torch.load(args.origin_vae_path, map_location='cpu')
+    var_local.vae_proxy[0].load_state_dict(origin_vae_ckpt, strict=True)
+    print(f'Loaded var.vae ckpt from {args.origin_vae_path}')
+
 
     model_size, trainable_model_size = cal_model_params(vae_wo_ddp)
     print('Number of vae params: %.4f M' % (model_size / 1e6))
@@ -211,19 +194,20 @@ def build_things_from_args(args: arg_util.Args):
     from torch.nn.parallel import DistributedDataParallel as DDP
     from utils.trainer import VAETrainer
     from utils.lpips import LPIPS
+    var_local = args.compile_model(var_local, args.compile_vae)
     vae_wo_ddp, disc_wo_ddp = args.compile_model(vae_wo_ddp, args.compile_vae), args.compile_model(disc_wo_ddp, args.compile_disc)
     lpips_loss: LPIPS = args.compile_model(LPIPS(args.lpips_path).to(args.device), fast=args.compile_lpips)
     
     # distributed wrapper
     ddp_class = DDP if dist_utils.initialized() else NullDDP
-    vae: DDP = ddp_class(vae_wo_ddp, device_ids=[dist_utils.get_local_rank()], find_unused_parameters=True, static_graph=args.ddp_static, broadcast_buffers=False)
-    disc: DDP = ddp_class(disc_wo_ddp, device_ids=[dist_utils.get_local_rank()], find_unused_parameters=True, static_graph=args.ddp_static, broadcast_buffers=False)
+    vae: DDP = ddp_class(vae_wo_ddp, device_ids=[dist_utils.get_local_rank()], find_unused_parameters=False, static_graph=args.ddp_static, broadcast_buffers=False)
+    disc: DDP = ddp_class(disc_wo_ddp, device_ids=[dist_utils.get_local_rank()], find_unused_parameters=False, static_graph=args.ddp_static, broadcast_buffers=False)
     
     vae_optim.model_maybe_fsdp = vae if args.zero else vae_wo_ddp
     disc_optim.model_maybe_fsdp = disc if args.zero else disc_wo_ddp
     
     trainer = VAETrainer(
-        is_visualizer=dist_utils.is_master(),
+        is_visualizer=dist_utils.is_master(), var_local=var_local,
         vae=vae, vae_wo_ddp=vae_wo_ddp, disc=disc, disc_wo_ddp=disc_wo_ddp, ema_ratio=args.ema,
         dcrit=args.dcrit, vae_opt=vae_optim, disc_opt=disc_optim,
         daug=args.disc_aug_prob, lpips_loss=lpips_loss, lp_reso=args.lpr, wei_l1=args.l1, wei_l2=args.l2, wei_entropy=args.le, wei_lpips=args.lp, wei_disc=args.ld, adapt_type=args.gada, bcr=args.bcr, bcr_cut=args.bcr_cut, reg=args.reg, reg_every=args.reg_every,
@@ -231,7 +215,7 @@ def build_things_from_args(args: arg_util.Args):
     )
     if trainer_state is not None and len(trainer_state):
         trainer.load_state_dict(trainer_state, strict=True)
-    del vae, vae_wo_ddp, disc, disc_wo_ddp, vae_optim, disc_optim
+    del vae, vae_wo_ddp, disc, disc_wo_ddp, vae_optim, disc_optim, var_local
 
     return (
         tb_lg, trainer,

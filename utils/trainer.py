@@ -10,7 +10,8 @@ import torch.nn.functional as F
 from matplotlib.colors import ListedColormap
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from models import VectorQuantizer2, VQVAE, DinoDisc
+from models.vqvae import VectorQuantizer2, VQVAE, DinoDisc
+from models import VAR
 from utils import arg_util, misc, nan
 from utils.amp_opt import AmpOptimizer
 from utils.diffaug import DiffAug
@@ -25,7 +26,7 @@ BTen = torch.BoolTensor
 
 class VAETrainer(object):
     def __init__(
-        self, is_visualizer: bool,
+        self, is_visualizer: bool, var_local: VAR,
         vae: DDP, vae_wo_ddp: VQVAE, disc: DDP, disc_wo_ddp: DinoDisc, ema_ratio: float,  # decoder, en_de_lin=True, seg_embed=False,
         dcrit: str, vae_opt: AmpOptimizer, disc_opt: AmpOptimizer,
         daug=1.0, lpips_loss: LPIPS = None, lp_reso=64, wei_l1=1.0, wei_l2=0.0, wei_entropy=0.0, wei_lpips=0.5, wei_disc=0.6, adapt_type=1, bcr=5.0, bcr_cut=0.5, reg=0.0, reg_every=16,
@@ -33,6 +34,7 @@ class VAETrainer(object):
     ):
         super(VAETrainer, self).__init__()
 
+        self.var_local = var_local
         self.vae, self.disc = vae, disc
         self.vae_opt, self.disc_opt = vae_opt, disc_opt
         self.vae_wo_ddp: VQVAE = vae_wo_ddp  # after torch.compile
@@ -82,12 +84,14 @@ class VAETrainer(object):
         if warmup_disc_schedule < 1e-6: warmup_disc_schedule = 0
         if fade_blur_schedule < 1e-6: fade_blur_schedule = 0
         loggable = (g_it == 0 or (g_it + 1) % 600 == 0) and self.is_visualizer
-        
+
+        hq0 = self.var_local.autoregressive_infer_cfg(lq)
         # [vae loss]
         with maybe_record_function('VAE_rec'):
             with self.vae_opt.amp_ctx:
                 self.vae_wo_ddp.forward
-                rec_B3HW, Lq, usage = self.vae(lq, ret_usages=loggable)
+                rec_B3HW, Lq, usage = self.vae(hq0, ret_usages=loggable)
+                assert Lq is not None
                 B = rec_B3HW.shape[0]
                 inp_rec_no_grad = torch.cat((hq, rec_B3HW.data), dim=0)
             

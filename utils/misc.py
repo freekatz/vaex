@@ -306,6 +306,42 @@ def auto_resume(args: arg_util.Args, pattern='ckpt*.pth') -> Tuple[List[str], in
         return info, ep, it, ckpt['trainer'], ckpt['args']
 
 
+def maybe_resume(args: arg_util.Args) -> Tuple[List[str], int, int, str, List[Tuple[float, float]], dict, dict]:
+    info = []
+    resume = args.resume
+    if resume is None or resume == '':
+        return info, 0, 0, '[no acc str]', [], {}, {}
+    try:
+        ckpt = torch.load(resume, map_location='cpu')
+    except Exception as e:
+        info.append(f'[auto_resume] failed, {e} @ {resume}')
+        return info, 0, 0, '[no acc str]', [], {}, {}
+
+    dist_utils.barrier()
+    ep, it = (ckpt['epoch'], ckpt['iter']) if 'iter' in ckpt else (ckpt['epoch'] + 1, 0)
+    eval_milestone = ckpt.get('milestones', [])
+    info.append(f'[auto_resume success] resume from ep{ep}, it{it},    eval_milestone: {eval_milestone}')
+    return info, ep, it, ckpt.get('acc_str', '[no acc str]'), eval_milestone, ckpt['trainer'], ckpt['args']
+
+
+def maybe_pretrain(args: arg_util.Args) -> dict:
+    pretrain = args.pretrain
+    if pretrain is None or pretrain == '':
+        return {}
+    try:
+        ckpt = torch.load(pretrain, map_location='cpu')
+    except Exception as e:
+        print(f'[pretrain] load failed, {e} @ {pretrain}')
+        return {}
+
+    dist_utils.barrier()
+    trainer_state = {
+        'vae_wo_ddp': ckpt,
+    }
+    print(f'[pretrain] load success @ {pretrain}')
+    return trainer_state
+
+
 def create_npz_from_sample_folder(sample_folder: str):
     """
     Builds a single .npz file from a folder of .png samples. Refer to DiT.

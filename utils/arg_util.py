@@ -13,6 +13,8 @@ from typing import Optional, Union
 import numpy as np
 import torch
 
+from utils.common import seed_everything
+
 try:
     from tap import Tap
 except ImportError as e:
@@ -29,6 +31,8 @@ class Args(Tap):
     bed: str = 'exp'           # Experiment Directory
     resume: str = ''            # if specified, load this checkpoint; if not, load the latest checkpoint in bed (if existing)
     pretrain: str = ''
+    origin_vae_path: str
+    var_path: str
     lpips_path: str        # lpips VGG model weights
     dino_path: str         # vit_small_patch16_224.pth model weights
     face_path: str = ''
@@ -164,25 +168,6 @@ class Args(Tap):
     seed: int = np.random.randint(1, 10000)        # seed
     deterministic: bool = False
     same_seed_for_all_ranks: int = 0     # this is only for distributed sampler
-    def seed_everything(self):
-        torch.backends.cudnn.enabled = True
-        torch.backends.cudnn.benchmark = True
-        torch.backends.cudnn.deterministic = False
-        if self.seed is not None:
-            print(f'[in seed_everything] {self.deterministic=}', flush=True)
-            if self.deterministic:
-                torch.backends.cudnn.benchmark = False
-                torch.backends.cudnn.deterministic = True
-                torch.use_deterministic_algorithms(True)
-                os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':16:8'
-            seed = self.seed + dist_utils.get_rank()*16384
-            os.environ['PYTHONHASHSEED'] = str(seed)
-            random.seed(seed)
-            np.random.seed(seed)
-            torch.manual_seed(seed)
-            torch.cuda.manual_seed(seed)
-            torch.cuda.manual_seed_all(seed)
-            self.same_seed_for_all_ranks = seed
     
     def get_different_generator_for_each_rank(self) -> Optional[torch.Generator]:   # for random augmentation
         if self.seed is None: return None
@@ -286,7 +271,7 @@ def init_dist_and_get_args():
     
     # set env
     args.set_tf32(args.tf32)
-    args.seed_everything()
+    args.same_seed_for_all_ranks = seed_everything(args.seed, benchmark=True)
     args.device = dist_utils.get_device()
     
     if not torch.cuda.is_available() or (not args.bf16 and not args.fp16):
