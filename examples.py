@@ -42,6 +42,7 @@ if __name__ == '__main__':
     parser.add_argument('--vae_ckpt_path', type=str, required=False, default='')
     parser.add_argument('--origin_vae_ckpt_path', type=str, required=False, default='')
     parser.add_argument('--var_ckpt_path', type=str, required=False, default='')
+    parser.add_argument('--exp_name', type=str, required=False, default='test')
     parser.add_argument('--task', type=str, required=False, default='vqvae',
                         choices=['var', 'var_all', 'vqvae', 'vqvae_all'])
     parser.add_argument('--batch_size', type=int, required=False, default=16)
@@ -92,12 +93,15 @@ if __name__ == '__main__':
     print(f'Loaded var ckpt from {args.var_ckpt_path}')
 
     origin_vae_ckpt = torch.load(args.origin_vae_ckpt_path, map_location='cpu')
-    var.vae_proxy[0].load_state_dict(origin_vae_ckpt, strict=True)
-    print(f'Loaded var.vae ckpt from {args.origin_vae_ckpt_path}')
+    if 'trainer' in origin_vae_ckpt.keys():
+        var.vae_proxy[0].load_state_dict(origin_vae_ckpt['trainer']['vae_wo_ddp'], strict=True)
+    else:
+        var.vae_proxy[0].load_state_dict(origin_vae_ckpt, strict=True)
+    print(f'Loaded var.vae ckpt from {args.vae_ckpt_path}')
 
     vae_ckpt = torch.load(args.vae_ckpt_path, map_location='cpu')
     if 'trainer' in vae_ckpt.keys():
-        vqvae.load_state_dict(vae_ckpt['trainer']['vae_ema'], strict=True)
+        vqvae.load_state_dict(vae_ckpt['trainer']['vae_wo_ddp'], strict=True)
     else:
         vqvae.load_state_dict(vae_ckpt, strict=True)
     print(f'Loaded vae ckpt from {args.vae_ckpt_path}')
@@ -158,6 +162,6 @@ if __name__ == '__main__':
     chw = PImage.fromarray(chw.astype(np.uint8))
 
     timestamp = int(time.time())
-    out_path = out_dir / f'{task_type}-{args.dataset_name}_{args.split}-{args.seed}-{timestamp}.png'
+    out_path = out_dir / f'{args.exp_name}-{task_type}-{args.dataset_name}_{args.split}-{timestamp}-{args.seed}.png'
     chw.save(out_path)
     print(f'Results ({res_img.shape}) saved to {out_path}')
